@@ -109,7 +109,7 @@ if __name__ == "__main__":
 
     # config = OmegaConf.load("configs/latent-diffusion/txt2img-1p4B-eval.yaml")  # TODO: Optionally download from same location as ckpt and chnage this logic
     # model = load_model_from_config(config, "models/ldm/text2img-large/model.ckpt")  # TODO: check path
-    config = OmegaConf.load("configs/stable-diffusion/v1-inference.yaml")
+    config = OmegaConf.load("models/ldm/stable-diffusion-v1/v1-inference.yaml")
     model = load_model_from_config(config, "models/ldm/stable-diffusion-v1/sd-v1-4.ckpt")
 
     device = torch.device("cuda") if torch.cuda.is_available() else \
