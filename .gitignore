@@ -1,0 +1,5 @@
+.venv
+.DS_Store
+__pycache__
+latent_diffusion.egg-info
+models/ldm/stable-diffusion-v1/sd-v1-4.ckpt

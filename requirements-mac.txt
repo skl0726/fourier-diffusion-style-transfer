@@ -1,0 +1,28 @@
+# For Mac M4
+# python version: 3.12
+
+torch>=2.3.0
+torchvision>=0.15.1
+numpy
+
+albumentations==0.4.3
+opencv-python==4.8.1.78
+pudb==2019.2
+imageio==2.9.0
+imageio-ffmpeg==0.4.2
+pytorch-lightning==1.4.2
+torchmetrics==0.7.0
+omegaconf==2.1.1
+test-tube>=0.7.5
+streamlit>=0.73.1
+einops==0.3.0
+torch-fidelity==0.3.0
+transformers==4.40.0
+tokenizers==0.19.1
+taming-transformers-rom1504
+kornia
+
+# pip install -e git+https://github.com/CompVis/taming-transformers.git@master#egg=taming-transformers
+# pip install -e git+https://github.com/openai/CLIP.git@main#egg=clip
+# pip install git+https://github.com/openai/CLIP.git
+# pip install -e .
