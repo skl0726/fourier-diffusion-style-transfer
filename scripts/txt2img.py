@@ -34,6 +34,10 @@ def load_model_from_config(config, ckpt, verbose=False):
 
 
 if __name__ == "__main__":
+    device = torch.device("cuda") if torch.cuda.is_available() else \
+            (torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu"))
+    print(f"========== device: {device} ==========")
+
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
