@@ -179,7 +179,7 @@ if __name__ == "__main__":
 python scripts/txt2img.py \
   --prompt "a baby" \
   --plms \
-  --outdir outputs/baby \
+  --outdir images/outputs/baby \
   --n_samples 1 --n_iter 1 \
   --H 512 --W 512 --ddim_steps 50 --scale 7.5
 """
