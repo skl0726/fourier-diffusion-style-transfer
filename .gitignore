@@ -2,5 +2,8 @@
 .DS_Store
 __pycache__
 latent_diffusion.egg-info
-models/ldm/stable-diffusion-v1/sd-v1-4.ckpt
 images/
+
+# LDM parameters
+models/ldm/stable-diffusion-v1-4/sd-v1-4.ckpt
+models/ldm/stable-diffusion-v1-5/v1-5-pruned.safetensors

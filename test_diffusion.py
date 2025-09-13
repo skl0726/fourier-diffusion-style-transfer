@@ -96,7 +96,7 @@ def describe_noise_level(
 # ---------------------------
 # 0) Setup: load pipeline on CPU and use DDIM scheduler
 # ---------------------------
-device = torch.device("cpu")
+device = "cuda" if torch.cuda.is_available() else "cpu"
 model_id = "runwayml/stable-diffusion-v1-5"
 
 pipe = StableDiffusionPipeline.from_pretrained(model_id)
@@ -223,7 +223,7 @@ def ddim_invert_latents(
         latent_in = torch.cat([latents, latents]) if do_cfg else latents
         latent_in = pipe.scheduler.scale_model_input(latent_in, t_next)
 
-        noise_pred = pipe.unet(latent_in, t_next, efncoder_hidden_states=text_embeds).sample
+        noise_pred = pipe.unet(latent_in, t_next, encoder_hidden_states=text_embeds).sample
         if do_cfg:
             n_uncond, n_text = noise_pred.chunk(2)
             noise_pred = n_uncond + guidance_scale * (n_text - n_uncond)
@@ -242,7 +242,7 @@ def ddim_invert_latents(
 # ---------------------------
 if __name__ == "__main__":
     # 5-1) Load an input image
-    img_path = "input.png"  # put your image here (512x512 recommended)
+    img_path = "images/inputs/input.png"  # put your image here (512x512 recommended)
     image = Image.open(img_path)
 
     # 5-2) Encode to latents
@@ -270,14 +270,12 @@ if __name__ == "__main__":
         guidance_scale=3.5,
         negative_prompt="",
         eta=0.0,
-        save_intermediates=True,
+        save_intermediates=False,
         save_prefix="recon_progress"
     )
 
     recon_pils = latents_to_pil(recon_latents)
 
-    if not os.path.exists("ddim_image"):
-        os.makedirs("ddim_image", exist_ok=True)
-    recon_pils[0].save("ddim_image/restore_ddim_inversion.png")
-
-    print("Saved: restore_forward_then_denoise.png and restore_ddim_inversion.png")
+    if not os.path.exists("images/outputs/test_diffusion"):
+        os.makedirs("images/outputs/test_diffusion", exist_ok=True)
+    recon_pils[0].save("images/outputs/test_diffusion/restor_ddim_inversion.png")
