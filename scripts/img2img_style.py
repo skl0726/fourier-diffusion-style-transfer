@@ -1,5 +1,7 @@
 import argparse, os
 import torch
+import torch.nn.functional as F
+import timm
 from PIL import Image
 from omegaconf import OmegaConf
 from torchvision import transforms as T
@@ -8,7 +10,7 @@ from diffusers import StableDiffusionPipeline, DDIMScheduler
 
 from ldm.models.diffusion.ddim import DDIMSampler
 from ldm.util import instantiate_from_config
-from modules.vit_encoder import ViTStyleEncoder
+from ldm.modules.attention import CrossAttention
 
 
 def pil_to_latents(pil_img: Image.Image, pipe, device):
@@ -38,43 +40,6 @@ def latents_to_pil(latents, pipe):
     images = (images / 2 + 0.5).clamp(0, 1)
     images = images.cpu().permute(0, 2, 3, 1).numpy()
     return pipe.numpy_to_pil(images)
-
-
-def register_kv_hook(unet, style_kv, replace_ratio):
-
-    def _hook(module, args):
-        """
-        args -> tuple of positional inputs (may be 1 or 2 elements)
-        For SD-1.x:
-            module(hidden_states, context)
-        For some patched versions:
-            module(hidden_states, context=None)  # context may be kwarg
-        """
-        # positional
-        hidden_states = args[0]
-        if len(args) == 2:                     # 일반적인 SD-1.x
-            context = args[1]
-        else:                                  # len==1 → context는 None이거나 kwarg로 전달
-            context = getattr(module, 'context', None)
-            if context is None:
-                # 마지막 보루: 이전 forward_pre_hook에서 module에 저장
-                context = hidden_states
-
-        style_320 = project_to_320(style_kv)
-
-        # 새 KV 생성
-        if replace_ratio == 1.0:
-            ctx_new = style_kv
-        elif replace_ratio == 0.0:
-            ctx_new = context
-        else:
-            ctx_new = torch.cat([context*(1-replace_ratio), style_kv*replace_ratio], dim=1)
-
-        return (hidden_states, ctx_new)
-
-    for m in unet.modules():
-        if m.__class__.__name__ == "CrossAttention":
-            m.register_forward_pre_hook(_hook, with_kwargs=False)
 
 
 @torch.no_grad()
@@ -133,11 +98,13 @@ def ddim_invert_latents(device,
 
 @torch.no_grad()
 def ddim_sample_from_inverted(device,
+                              model,
                               sampler,
                               start_latents,
                               start_step,
                               cond,
-                              uncond,
+                              prompt,
+                              negative_prompt,
                               guidance_scale,
                               ddim_steps,
                               ddim_eta):
@@ -149,7 +116,7 @@ def ddim_sample_from_inverted(device,
     sampler.make_schedule(ddim_num_steps=ddim_steps, ddim_eta=ddim_eta)
 
     # cond = model.get_learned_conditioning([prompt])
-    # uncond = model.get_learned_conditioning([negative_prompt if negative_prompt is not None else ""])
+    uncond = model.get_learned_conditioning([negative_prompt])
     latents = start_latents.clone()
 
     batch_size = start_latents.shape[0]
@@ -217,9 +184,9 @@ def main(args):
         pipe=pipe,
         latents_0=latents_0,
         prompt="",
+        negative_prompt="",
         num_inference_steps=args.ddim_steps,
         guidance_scale=1.0, # fix
-        negative_prompt="",
     )
 
     total_steps = len(inverted_latents_seq) - 1
@@ -227,47 +194,65 @@ def main(args):
     start_latents = inverted_latents_seq[start_step]
 
 
-    # ***** style injection test *****
-    style_encoder = ViTStyleEncoder()
-    style_feature = style_encoder(Image.open(opt.sty_img), device=device) # (1, N, 768)
+    # ********** style injection test **********
+    style_img = Image.open(args.sty_img).convert("RGB")
     
+    vit_encoder = timm.create_model('vit_base_patch16_224', pretrained=True).to(device).eval()
+    vit_tfm = T.Compose([
+        T.Resize(224, interpolation=T.InterpolationMode.BICUBIC),
+        T.CenterCrop(224),
+        T.ToTensor(), T.Normalize([0.5]*3, [0.5]*3)
+    ])
+
+    with torch.no_grad():
+        style_tensor = vit_tfm(style_img).unsqueeze(0).to(device)
+        style_tokens = vit_encoder.forward_features(style_tensor)[:, 1:, :] # drop CLS
+
     B = start_latents.shape[0]
-    style_feature = style_feature.expand(B, -1, -1)
+    style_tokens = style_tokens.expand(B, -1, -1) * args.sty_alpha
 
-    first_ca = next(m for m in ldm_model.modules()
-                if m.__class__.__name__ == "CrossAttention")
+    # def hijack_kv(module, style_kv):
+    #     def forward(x, context=None, **kwargs):
+    #         q = module.to_q(x)
+    #         k = style_kv
+    #         v = style_kv
 
-    W_k = first_ca.to_k.weight       # [320, 768] 또는 [320,320]
-    b_k = first_ca.to_k.bias         # [320]
+    #         b, _, c = q.shape
+    #         h = module.heads
+    #         q = q.view(b, -1, h, c // h).transpose(1, 2)
+    #         k = k.view(b, -1, h, c // h).transpose(1, 2)
+    #         v = v.view(b, -1, h, c // h).transpose(1, 2)
+            
+    #         out = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0, is_causal=False)
+    #         out = out.transpose(1, 2).reshape(b, -1, c)
+            
+    #         return module.to_out(out)
+        
+    #     module.forward = forward
 
-    def project_to_320(x: torch.Tensor):
-        """
-        x : (B, N, 768 또는 320)
-        반환: (B, N, 320) - 모델의 to_k/to_v 입력 크기와 동일
-        """
-        if x.shape[-1] == 320:
-            return x
-        return torch.matmul(x, W_k.T.to(x.dtype)) + b_k
+    # # dimension matching
+    # dim_unet = next(m for _,m in ldm_model.model.named_modules()
+    #                 if isinstance(m, CrossAttention)).to_k.in_features
+    # proj = torch.nn.Linear(768, dim_unet, bias=False).to(device)
+    # proj.weight.requires_grad_(False)
+    # style_kv = proj(style_tokens)
 
-    register_kv_hook(ldm_model.model.diffusion_model,
-                     style_feature,
-                     opt.sty_alpha)
-
-    empty = ldm_model.get_learned_conditioning([""])
-    cond = {"c_crossattn": [empty]*25}
-    uncond = {"c_crossattn": [empty]*25}
-    # ********************************
-
+    # for _, m in ldm_model.model.named_modules():
+    #     if isinstance(m, CrossAttention):
+    #         hijack_kv(m, style_kv)
+    # ******************************************
     
     # 3) DDIM Sampling
     reconstructed_latents = ddim_sample_from_inverted(
         device=device,
+        model=ldm_model,
         sampler=sampler,
         start_latents=start_latents,
         start_step=start_step,
-        cond=cond,
-        uncond=uncond,
-        guidance_scale=args.guidance_scale,
+        cond=style_tokens,
+        prompt=args.prompt,
+        negative_prompt=args.negative_prompt,
+        guidance_scale=1.0, # fix
         ddim_steps=args.ddim_steps,
         ddim_eta=args.ddim_eta,
     )
@@ -287,16 +272,15 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--cnt_img", type=str, default="images/inputs/input.png")
-    parser.add_argument("--sty_img", type=str, default="images/inputs/sty_1.png")
+    parser.add_argument("--cnt_img", type=str, default="images/inputs/cnt/cnt_1.png")
+    parser.add_argument("--sty_img", type=str, default="images/inputs/sty/sty_1.png")
     parser.add_argument("--sty_alpha", type=float, default=1.0)
     parser.add_argument("--output_img", type=str, default="images/outputs/img2img_style/stylized.png")
-    parser.add_argument("--prompt", type=str, default="a photograph of stylized image")
+    parser.add_argument("--prompt", type=str, default="")
     parser.add_argument("--negative_prompt", type=str, default="")
     parser.add_argument("--strength", type=float, default=0.2)
     parser.add_argument("--ddim_steps", type=int, default=100)
     parser.add_argument("--ddim_eta", type=float, default=0.0)
-    parser.add_argument("--guidance_scale", type=float, default=1.0) # > 1.0인 경우 에러
     
     opt = parser.parse_args()
     main(opt)
@@ -306,9 +290,7 @@ if __name__ == "__main__":
 python scripts/img2img_style.py \
   --cnt_img images/inputs/cnt/cnt_1.png \
   --sty_img images/inputs/sty/sty_1.png \
-  --output_img images/outputs/img2img_style/stylized_new.png \
-  --strength 0.6 \
+  --output_img images/outputs/img2img_style/stylized_1.png \
+  --strength 0.5 \
   --ddim_steps 100
-
-# 'strength'만큼 DDIM forward noising(x_0 -> x_t)
 """

@@ -260,7 +260,6 @@ python scripts/img2img_style_old.py \
   --cnt_img images/inputs/cnt/cnt_1.png \
   --sty_img images/inputs/sty/sty_4.png \
   --output_img images/outputs/img2img_style/stylized_4.png \
-  --prompt "a photograph of stylized image" \
   --strength 0.6 \
   --ddim_steps 100
 """
