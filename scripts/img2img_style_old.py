@@ -8,7 +8,7 @@ from diffusers import StableDiffusionPipeline, DDIMScheduler
 
 from ldm.models.diffusion.ddim import DDIMSampler
 from ldm.util import instantiate_from_config
-from modules.vit_encoder import ViTStyleEncoder
+from modules.clip_vit import get_style_tokens
 
 
 def pil_to_latents(pil_img: Image.Image, pipe, device):
@@ -38,24 +38,6 @@ def latents_to_pil(latents, pipe):
     images = (images / 2 + 0.5).clamp(0, 1)
     images = images.cpu().permute(0, 2, 3, 1).numpy()
     return pipe.numpy_to_pil(images)
-
-
-def register_kv_hook(unet, style_kv, replace_ratio):
-    """
-    Forward-pre-hook로 context(KV) 교체/블렌드
-    """
-    def _hook(module, inputs):
-        h, ctx = inputs           # h: Q 생성용, ctx: 원본 KV
-        if replace_ratio==1.0:
-            ctx_new = style_kv
-        elif replace_ratio==0.0:
-            ctx_new = ctx
-        else:
-            ctx_new = torch.cat([ctx*(1-replace_ratio), style_kv*replace_ratio], dim=1)
-        return (h, ctx_new)
-    for m in unet.modules():
-        if m.__class__.__name__=="CrossAttention":
-            m.register_forward_pre_hook(_hook)
 
 
 @torch.no_grad()
@@ -198,9 +180,9 @@ def main(args):
         pipe=pipe,
         latents_0=latents_0,
         prompt="",
+        negative_prompt="",
         num_inference_steps=args.ddim_steps,
         guidance_scale=1.0, # fix
-        negative_prompt="",
     )
 
     total_steps = len(inverted_latents_seq) - 1
@@ -208,19 +190,28 @@ def main(args):
     start_latents = inverted_latents_seq[start_step]
 
 
-    # ***** style injection test (fixed) *****
-    style_encoder = ViTStyleEncoder()
-    style_feature = style_encoder(Image.open(opt.sty_img), device=device) # (1, N, 768)
-    
+    # ***** style injection test *****
+    style_img = Image.open(args.sty_img).convert("RGB")
+    style_tokens = get_style_tokens(style_img, device=device)                 # (1, N_style, 768)
+    style_tokens = style_tokens / style_tokens.std(dim=-1, keepdim=True)      # normalize
+
+    cond_text = ldm_model.get_learned_conditioning([args.prompt])             # (1, N_txt, 768)
+    uncond_text = ldm_model.get_learned_conditioning([args.negative_prompt])  # (1, N_txt, 768)
+
+    def match_batch(x, B):
+        return x if x.shape[0] == B else x.expand(B, -1, -1)
+
     B = start_latents.shape[0]
-    style_feature = style_feature.expand(B, -1, -1)
-    register_forward_pre_hook(model.model.diffusion_model, style_feature. opt.sty_alpha)
+    cond_text, uncond_text = map(lambda t: match_batch(t.to(device), B),
+                               (cond_text, uncond_text))
+    style_tokens = match_batch(style_tokens.to(device, dtype=cond_text.dtype), B)
 
-    empty = model.get_learned_conditioning([""])
-    cond = {"c_crossattn": [empty]*25}
-    uncond = {"c_crossattn": [empty]*25}
+    num_layers = 25 # number of SD-1.x UNet cross-attention layer
+    cross  = torch.cat([cond_text,  args.sty_alpha * style_tokens], dim=1)
+    ucross = torch.cat([uncond_text, torch.zeros_like(style_tokens)], dim=1)
+    cond   = {"c_crossattn": [cross]  * num_layers}
+    uncond = {"c_crossattn": [ucross] * num_layers}
     # ********************************
-
     
     # 3) DDIM Sampling
     reconstructed_latents = ddim_sample_from_inverted(
@@ -230,7 +221,7 @@ def main(args):
         start_step=start_step,
         cond=cond,
         uncond=uncond,
-        guidance_scale=args.guidance_scale,
+        guidance_scale=1.0, # fix
         ddim_steps=args.ddim_steps,
         ddim_eta=args.ddim_eta,
     )
@@ -250,28 +241,26 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--cnt_img", type=str, default="images/inputs/input.png")
-    parser.add_argument("--sty_img", type=str, default="images/inputs/sty_1.png")
+    parser.add_argument("--cnt_img", type=str, default="images/inputs/cnt/cnt_1.png")
+    parser.add_argument("--sty_img", type=str, default="images/inputs/sty/sty_1.png")
     parser.add_argument("--sty_alpha", type=float, default=1.0)
     parser.add_argument("--output_img", type=str, default="images/outputs/img2img_style/stylized.png")
-    parser.add_argument("--prompt", type=str, default="a photograph of stylized image")
+    parser.add_argument("--prompt", type=str, default="")
     parser.add_argument("--negative_prompt", type=str, default="")
     parser.add_argument("--strength", type=float, default=0.2)
     parser.add_argument("--ddim_steps", type=int, default=100)
     parser.add_argument("--ddim_eta", type=float, default=0.0)
-    parser.add_argument("--guidance_scale", type=float, default=1.0) # > 1.0인 경우 에러
     
     opt = parser.parse_args()
     main(opt)
 
 
 """
-python scripts/img2img_style_new.py \
-  --cnt_img images/inputs/input.png \
-  --sty_img images/inputs/sty_1.png \
-  --output_img images/outputs/img2img_style/stylized_new.png \
+python scripts/img2img_style_old.py \
+  --cnt_img images/inputs/cnt/cnt_1.png \
+  --sty_img images/inputs/sty/sty_4.png \
+  --output_img images/outputs/img2img_style/stylized_4.png \
+  --prompt "a photograph of stylized image" \
   --strength 0.6 \
   --ddim_steps 100
-
-# 'strength'만큼 DDIM forward noising(x_0 -> x_t)
 """

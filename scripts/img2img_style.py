@@ -8,7 +8,7 @@ from diffusers import StableDiffusionPipeline, DDIMScheduler
 
 from ldm.models.diffusion.ddim import DDIMSampler
 from ldm.util import instantiate_from_config
-from modules.clip_vit import get_style_tokens
+from modules.vit_encoder import ViTStyleEncoder
 
 
 def pil_to_latents(pil_img: Image.Image, pipe, device):
@@ -38,6 +38,43 @@ def latents_to_pil(latents, pipe):
     images = (images / 2 + 0.5).clamp(0, 1)
     images = images.cpu().permute(0, 2, 3, 1).numpy()
     return pipe.numpy_to_pil(images)
+
+
+def register_kv_hook(unet, style_kv, replace_ratio):
+
+    def _hook(module, args):
+        """
+        args -> tuple of positional inputs (may be 1 or 2 elements)
+        For SD-1.x:
+            module(hidden_states, context)
+        For some patched versions:
+            module(hidden_states, context=None)  # context may be kwarg
+        """
+        # positional
+        hidden_states = args[0]
+        if len(args) == 2:                     # 일반적인 SD-1.x
+            context = args[1]
+        else:                                  # len==1 → context는 None이거나 kwarg로 전달
+            context = getattr(module, 'context', None)
+            if context is None:
+                # 마지막 보루: 이전 forward_pre_hook에서 module에 저장
+                context = hidden_states
+
+        style_320 = project_to_320(style_kv)
+
+        # 새 KV 생성
+        if replace_ratio == 1.0:
+            ctx_new = style_kv
+        elif replace_ratio == 0.0:
+            ctx_new = context
+        else:
+            ctx_new = torch.cat([context*(1-replace_ratio), style_kv*replace_ratio], dim=1)
+
+        return (hidden_states, ctx_new)
+
+    for m in unet.modules():
+        if m.__class__.__name__ == "CrossAttention":
+            m.register_forward_pre_hook(_hook, with_kwargs=False)
 
 
 @torch.no_grad()
@@ -190,84 +227,36 @@ def main(args):
     start_latents = inverted_latents_seq[start_step]
 
 
-    # ***** style injection test (fixed) *****
-    style_img = Image.open(args.sty_img).convert("RGB")
-    style_tokens = get_style_tokens(style_img, device=device)  # (1, N_style, 768)
-    style_tokens = style_tokens / style_tokens.std(dim=-1, keepdim=True) # normalize
-
-    cond_text = ldm_model.get_learned_conditioning([args.prompt])  # (1, N_txt, 768)
-    uncond_text = ldm_model.get_learned_conditioning([""])  # (1, N_txt, 768)
-
-    def match_batch(x, B):
-        return x if x.shape[0] == B else x.expand(B, -1, -1)
-
-    B = start_latents.shape[0]
-    cond_txt, uncond_txt = map(lambda t: match_batch(t.to(device), B),
-                               (cond_text, uncond_text))
-    style_tokens = match_batch(style_tokens.to(device, dtype=cond_txt.dtype), B)
-
-    num_layers=25 # number of SD-1.x UNet cross-attention layer
-    cross  = torch.cat([cond_txt,  args.sty_alpha * style_tokens], dim=1)
-    ucross = torch.cat([uncond_txt, torch.zeros_like(style_tokens)], dim=1)
-    cond   = {"c_crossattn": [cross]  * num_layers}   # <-- (1)
-    uncond = {"c_crossattn": [ucross] * num_layers}
-
-    # alpha = args.sty_alpha
-
-    # # 정수 배치 크기
-    # B = start_latents.shape[0]
-
-    # # dtype/device 정렬
-    # style_tokens = style_tokens.to(device=device, dtype=cond_text.dtype)
-    # cond_text   = cond_text.to(device=device)
-    # uncond_text = uncond_text.to(device=device)
-
-    # def match_batch(x: torch.Tensor, B: int):
-    #     # 보장: x는 (batch, seq_len, dim) 형태여야 함. 만약 (seq_len, dim)이라면 batch 차원 추가
-    #     if x.dim() == 2:
-    #         x = x.unsqueeze(0)
-
-    #     b0 = x.shape[0]  # 실제 배치 크기 (int)
-
-    #     if b0 == B:
-    #         return x
-    #     if b0 == 1 and B > 1:
-    #         return x.expand(B, -1, -1)
-    #     # 만약 B가 b0의 배수가 아니라면 단순히 앞에서 자름 (혹은 원하는 동작으로 바꿔도 됨)
-    #     if B % b0 != 0:
-    #         return x[:B]
-    #     reps = B // b0
-    #     return x.repeat(reps, 1, 1)
+    # ***** style injection test *****
+    style_encoder = ViTStyleEncoder()
+    style_feature = style_encoder(Image.open(opt.sty_img), device=device) # (1, N, 768)
     
-    # cond_text_b    = match_batch(cond_text, B)      # (B, N_txt, 768)
-    # uncond_text_b  = match_batch(uncond_text, B)    # (B, N_txt, 768)
-    # style_tokens_b = match_batch(style_tokens, B)   # (B, N_style, 768)
+    B = start_latents.shape[0]
+    style_feature = style_feature.expand(B, -1, -1)
 
-    # cond   = {"c_crossattn": [torch.cat([cond_text_b,   alpha * style_tokens_b], dim=1)]}
-    # uncond = {"c_crossattn": [torch.cat([uncond_text_b, torch.zeros_like(style_tokens_b)], dim=1)]}
+    first_ca = next(m for m in ldm_model.modules()
+                if m.__class__.__name__ == "CrossAttention")
+
+    W_k = first_ca.to_k.weight       # [320, 768] 또는 [320,320]
+    b_k = first_ca.to_k.bias         # [320]
+
+    def project_to_320(x: torch.Tensor):
+        """
+        x : (B, N, 768 또는 320)
+        반환: (B, N, 320) - 모델의 to_k/to_v 입력 크기와 동일
+        """
+        if x.shape[-1] == 320:
+            return x
+        return torch.matmul(x, W_k.T.to(x.dtype)) + b_k
+
+    register_kv_hook(ldm_model.model.diffusion_model,
+                     style_feature,
+                     opt.sty_alpha)
+
+    empty = ldm_model.get_learned_conditioning([""])
+    cond = {"c_crossattn": [empty]*25}
+    uncond = {"c_crossattn": [empty]*25}
     # ********************************
-
-    ##########    
-    # cond_tensor = cond["c_crossattn"][0].to(device=device)
-    # uncond_tensor = uncond["c_crossattn"][0].to(device=device)
-
-    # # ensure batch dimension matches start_latents batch size
-    # latent_batch = start_latents.shape[0]
-    # if cond_tensor.shape[0] != latent_batch:
-    #     # if cond_tensor was (1, seq, dim), expand to match batch
-    #     if cond_tensor.shape[0] == 1:
-    #         cond_tensor = cond_tensor.expand(latent_batch, -1, -1)
-    #         uncond_tensor = uncond_tensor.expand(latent_batch, -1, -1)
-    #     else:
-    #         # if smaller but divides, repeat; otherwise trim/expand first row
-    #         if latent_batch % cond_tensor.shape[0] == 0:
-    #             reps = latent_batch // cond_tensor.shape[0]
-    #             cond_tensor = cond_tensor.repeat(reps, 1, 1)
-    #             uncond_tensor = uncond_tensor.repeat(reps, 1, 1)
-    #         else:
-    #             cond_tensor = cond_tensor[:latent_batch].expand(latent_batch, -1, -1)
-    #             uncond_tensor = uncond_tensor[:latent_batch].expand(latent_batch, -1, -1)
-    ##########
 
     
     # 3) DDIM Sampling
@@ -315,14 +304,11 @@ if __name__ == "__main__":
 
 """
 python scripts/img2img_style.py \
-  --cnt_img images/inputs/input.png \
-  --sty_img images/inputs/sty_1.png \
-  --output_img images/outputs/img2img_style/stylized.png \
-  --prompt "a photograph of stylized image" \
+  --cnt_img images/inputs/cnt/cnt_1.png \
+  --sty_img images/inputs/sty/sty_1.png \
+  --output_img images/outputs/img2img_style/stylized_new.png \
   --strength 0.6 \
-  --ddim_steps 100 \
-  --ddim_eta 0.0 \
-  --guidance_scale 1.0
+  --ddim_steps 100
 
 # 'strength'만큼 DDIM forward noising(x_0 -> x_t)
 """

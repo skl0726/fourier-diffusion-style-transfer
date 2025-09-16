@@ -113,8 +113,8 @@ if __name__ == "__main__":
 
     # config = OmegaConf.load("configs/latent-diffusion/txt2img-1p4B-eval.yaml")  # TODO: Optionally download from same location as ckpt and chnage this logic
     # model = load_model_from_config(config, "models/ldm/text2img-large/model.ckpt")  # TODO: check path
-    config = OmegaConf.load("models/ldm/stable-diffusion-v1/v1-inference.yaml")
-    model = load_model_from_config(config, "models/ldm/stable-diffusion-v1/sd-v1-4.ckpt")
+    config = OmegaConf.load("models/ldm/stable-diffusion-v1-4/v1-inference.yaml")
+    model = load_model_from_config(config, "models/ldm/stable-diffusion-v1-4/sd-v1-4.ckpt")
 
     device = torch.device("cuda") if torch.cuda.is_available() else \
         (torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu"))
@@ -179,7 +179,7 @@ if __name__ == "__main__":
 python scripts/txt2img.py \
   --prompt "a baby" \
   --plms \
-  --outdir images/outputs/baby \
+  --outdir images/outputs/txt2img/baby \
   --n_samples 1 --n_iter 1 \
-  --H 512 --W 512 --ddim_steps 50 --scale 7.5
+  --H 512 --W 512 --ddim_steps 100 --scale 7.5
 """

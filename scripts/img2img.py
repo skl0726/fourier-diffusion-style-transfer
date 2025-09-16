@@ -178,9 +178,9 @@ def main(args):
         pipe=pipe,
         latents_0=latents_0,
         prompt="",
-        num_inference_steps=args.ddim_steps,
-        guidance_scale=1.0, # fix
         negative_prompt="",
+        guidance_scale=1.0, # fix
+        num_inference_steps=args.ddim_steps,
     )
 
     total_steps = len(inverted_latents_seq) - 1
@@ -194,9 +194,9 @@ def main(args):
         sampler=sampler,
         start_latents=start_latents,
         start_step=start_step,
-        prompt="",
-        negative_prompt="",
-        guidance_scale=args.guidance_scale,
+        prompt=args.prompt,
+        negative_prompt=args.negative_prompt,
+        guidance_scale=1.0, # fix
         ddim_steps=args.ddim_steps,
         ddim_eta=args.ddim_eta,
     )
@@ -218,12 +218,11 @@ if __name__ == "__main__":
 
     parser.add_argument("--input", type=str, default="images/inputs/input.png")
     parser.add_argument("--output", type=str, default="images/outputs/img2img/input_restored.png")
-    parser.add_argument("--prompt", type=str, default="a photograph")
+    parser.add_argument("--prompt", type=str, default="")
     parser.add_argument("--negative_prompt", type=str, default="")
     parser.add_argument("--strength", type=float, default=0.2)
     parser.add_argument("--ddim_steps", type=int, default=100)
     parser.add_argument("--ddim_eta", type=float, default=0.0)
-    parser.add_argument("--guidance_scale", type=float, default=1.0) # error if guidance_scale > 1.0
     
     opt = parser.parse_args()
     main(opt)
@@ -233,9 +232,6 @@ if __name__ == "__main__":
 python scripts/img2img.py \
   --input images/inputs/input.png \
   --output images/outputs/img2img/input_restored.png \
-  --prompt "a photograph" \
   --strength 0.2 \
-  --ddim_steps 100 \
-
-# 'strength'만큼 DDIM forward noising(x_0 -> x_t)
+  --ddim_steps 100
 """

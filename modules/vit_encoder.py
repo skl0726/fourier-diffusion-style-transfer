@@ -43,6 +43,9 @@ class ViTStyleEncoder(nn.Module):
 
         # zero-mean/var-1 정규화 → 스타일 강도 균일화
         patch_tok = patch_tok / patch_tok.std(dim=-1, keepdim=True)
+
+        MAX_TOKEN = 77
+        patch_tok = patch_tok[:, :MAX_TOKEN]
         return patch_tok                          # (1, N_style, 768)
 
     def _to(self, device):
