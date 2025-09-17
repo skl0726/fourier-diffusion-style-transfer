@@ -1,7 +1,5 @@
 import argparse, os
 import torch
-import torch.nn.functional as F
-import timm
 from PIL import Image
 from omegaconf import OmegaConf
 from torchvision import transforms as T
@@ -10,7 +8,7 @@ from diffusers import StableDiffusionPipeline, DDIMScheduler
 
 from ldm.models.diffusion.ddim import DDIMSampler
 from ldm.util import instantiate_from_config
-from ldm.modules.attention import CrossAttention
+from modules.clip_vit import clip_vit_encoder, StyleSelfAttention
 
 
 def pil_to_latents(pil_img: Image.Image, pipe, device):
@@ -98,13 +96,11 @@ def ddim_invert_latents(device,
 
 @torch.no_grad()
 def ddim_sample_from_inverted(device,
-                              model,
                               sampler,
                               start_latents,
                               start_step,
                               cond,
-                              prompt,
-                              negative_prompt,
+                              uncond,
                               guidance_scale,
                               ddim_steps,
                               ddim_eta):
@@ -115,8 +111,8 @@ def ddim_sample_from_inverted(device,
 
     sampler.make_schedule(ddim_num_steps=ddim_steps, ddim_eta=ddim_eta)
 
-    # cond = model.get_learned_conditioning([prompt])
-    uncond = model.get_learned_conditioning([negative_prompt])
+    # cond = model.get_learned_conditioning([prompt if prompt is not None else ""])
+    # uncond = model.get_learned_conditioning([negative_prompt if negative_prompt is not None else ""])
     latents = start_latents.clone()
 
     batch_size = start_latents.shape[0]
@@ -194,64 +190,44 @@ def main(args):
     start_latents = inverted_latents_seq[start_step]
 
 
-    # ********** style injection test **********
+    # ***** style injection test *****
     style_img = Image.open(args.sty_img).convert("RGB")
-    
-    vit_encoder = timm.create_model('vit_base_patch16_224', pretrained=True).to(device).eval()
-    vit_tfm = T.Compose([
-        T.Resize(224, interpolation=T.InterpolationMode.BICUBIC),
-        T.CenterCrop(224),
-        T.ToTensor(), T.Normalize([0.5]*3, [0.5]*3)
-    ])
 
-    with torch.no_grad():
-        style_tensor = vit_tfm(style_img).unsqueeze(0).to(device)
-        style_tokens = vit_encoder.forward_features(style_tensor)[:, 1:, :] # drop CLS
+    # clip vit encoder
+    tokens = clip_vit_encoder(
+        style_img,
+        device=device,
+        out_dim=768,
+        max_tokens=77
+    ) # (1, N_style, 768)
+    tokens = tokens / tokens.std(dim=-1, keepdim=True) # normalize
+
+    # self-attention network (after clip vit encoder)
+    style_encoder = StyleSelfAttention(dim=768, nhead=8, nlayers=2).to(device)
+    style_tokens = style_encoder(tokens)
+
+    uncond_text = ldm_model.get_learned_conditioning([args.negative_prompt]) # (1, N_txt=77, 768)
+
+    def match_batch(x, B):
+        return x if x.shape[0] == B else x.expand(B, -1, -1)
 
     B = start_latents.shape[0]
-    style_tokens = style_tokens.expand(B, -1, -1) * args.sty_alpha
+    uncond_text = match_batch(uncond_text.to(device), B)
+    style_tokens = match_batch(style_tokens.to(device, dtype=uncond_text.dtype), B)
 
-    # def hijack_kv(module, style_kv):
-    #     def forward(x, context=None, **kwargs):
-    #         q = module.to_q(x)
-    #         k = style_kv
-    #         v = style_kv
-
-    #         b, _, c = q.shape
-    #         h = module.heads
-    #         q = q.view(b, -1, h, c // h).transpose(1, 2)
-    #         k = k.view(b, -1, h, c // h).transpose(1, 2)
-    #         v = v.view(b, -1, h, c // h).transpose(1, 2)
-            
-    #         out = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0, is_causal=False)
-    #         out = out.transpose(1, 2).reshape(b, -1, c)
-            
-    #         return module.to_out(out)
-        
-    #     module.forward = forward
-
-    # # dimension matching
-    # dim_unet = next(m for _,m in ldm_model.model.named_modules()
-    #                 if isinstance(m, CrossAttention)).to_k.in_features
-    # proj = torch.nn.Linear(768, dim_unet, bias=False).to(device)
-    # proj.weight.requires_grad_(False)
-    # style_kv = proj(style_tokens)
-
-    # for _, m in ldm_model.model.named_modules():
-    #     if isinstance(m, CrossAttention):
-    #         hijack_kv(m, style_kv)
-    # ******************************************
+    num_layers = 25 # number of SD-1.x UNet cross-attention layer
+    cond   = {"c_crossattn": [args.sty_alpha * style_tokens]  * num_layers}
+    uncond = {"c_crossattn": [uncond_text] * num_layers}
+    # ********************************
     
     # 3) DDIM Sampling
     reconstructed_latents = ddim_sample_from_inverted(
         device=device,
-        model=ldm_model,
         sampler=sampler,
         start_latents=start_latents,
         start_step=start_step,
-        cond=style_tokens,
-        prompt=args.prompt,
-        negative_prompt=args.negative_prompt,
+        cond=cond,
+        uncond=uncond,
         guidance_scale=1.0, # fix
         ddim_steps=args.ddim_steps,
         ddim_eta=args.ddim_eta,
@@ -287,10 +263,28 @@ if __name__ == "__main__":
 
 
 """
-python scripts/img2img_style.py \
+CUDA_VISIBLE_DEVICES=7 python inference/img2img_style.py \
   --cnt_img images/inputs/cnt/cnt_1.png \
-  --sty_img images/inputs/sty/sty_1.png \
-  --output_img images/outputs/img2img_style/stylized_1.png \
-  --strength 0.5 \
+  --sty_img images/inputs/sty/sty_4.png \
+  --output_img images/outputs/img2img_style/stylized_4.png \
+  --strength 0.4 \
   --ddim_steps 100
+"""
+
+
+"""
+[MEMO]
+
+problem:
+- style 이미지를 condition으로 넣었을 때 제대로 동작하지 않음 (기존 style transfer 모델의 전형적인 output과는 다른 이미지가 출력)
+- content와 style 이미지를 모두 동일한 이미지로 사용했을 때에도, style 이미지를 다른 것을 사용했을 때와 비슷한 결과 출력
+
+stable diffusion의 u-net이 이해할 수 있는 style condition representation을 학습 (StyleSelfAttention 학습)
+
+idea:
+i)  stage 1 (training style encoder): ldm의 u-net이 이해할 수 있는 style condition representation을 학습 (StyleSelfAttention 학습)
+ii) stage 2 (fine-tuning denoising u-net): fourier transform 적용 (병렬 diffsuion)
+
+todo:
+- stage 1을 위한 학습 준비하기 -> StyleSelfAttention training & Denoising U-Net fine-tuning, style image dataset 확보
 """

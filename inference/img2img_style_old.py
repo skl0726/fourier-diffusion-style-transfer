@@ -191,6 +191,8 @@ def main(args):
 
 
     # ***** style injection test *****
+    # "vit clip encoder를 거친 style image feature를 text embedding과 concat하여 conditioning한 방식"
+
     style_img = Image.open(args.sty_img).convert("RGB")
     style_tokens = get_style_tokens(style_img, device=device)                 # (1, N_style, 768)
     style_tokens = style_tokens / style_tokens.std(dim=-1, keepdim=True)      # normalize
@@ -256,7 +258,7 @@ if __name__ == "__main__":
 
 
 """
-python scripts/img2img_style_old.py \
+python inference/img2img_style_old.py \
   --cnt_img images/inputs/cnt/cnt_1.png \
   --sty_img images/inputs/sty/sty_4.png \
   --output_img images/outputs/img2img_style/stylized_4.png \

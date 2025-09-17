@@ -8,7 +8,7 @@ _clip_proc = None
 _proj = None
 
 
-def get_style_tokens(img: Image.Image,
+def clip_vit_encoder(img: Image.Image,
                      model_name="openai/clip-vit-large-patch14",
                      out_dim=768,
                      max_tokens=64,
@@ -34,6 +34,30 @@ def get_style_tokens(img: Image.Image,
             factor = N // max_tokens
             tokens = tokens[:, :factor * max_tokens, :]
             tokens = tokens.reshape(B, max_tokens, factor, C).mean(dim=2)
-        style_tokens = _proj(tokens)  # (1, N_style, out_dim)
+        tokens = _proj(tokens)  # (1, N_style, out_dim)
 
-    return style_tokens
+    return tokens
+
+
+class StyleSelfAttention(nn.Module):
+    def __init__(self, dim=768, nhead=8, nlayers=2, dim_feedforward=2048, dropout=0.1):
+        super().__init__()
+        encoder_layer = nn.TransformerEncoderLayer(d_model=dim,
+                                                   nhead=nhead,
+                                                   dim_feedforward=dim_feedforward,
+                                                   dropout=dropout,
+                                                   batch_first=True)
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=nlayers)
+
+    def forward(self, tokens):
+        return self.encoder(tokens)
+
+
+if __name__ == "__main__":
+    attn = StyleSelfAttention(dim=768, nhead=8, nlayers=2, dim_feedforward=2048, dropout=0.1)
+
+    total_params = sum(p.numel() for p in attn.parameters())
+    trainable_params = sum(p.numel() for p in attn.parameters() if p.requires_grad)
+
+    print("Total params:", total_params)
+    print("Trainable params:", trainable_params)
