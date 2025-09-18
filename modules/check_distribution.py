@@ -60,6 +60,7 @@ def cosine_stats(A, B):
 
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"===== device: {device} =====")
     
     # load model (for DDIM Sampling)
     CONFIG_PATH = "models/ldm/stable-diffusion-v1-5/v1-inference.yaml"      # TODO: set config path
@@ -99,7 +100,7 @@ if __name__ == "__main__":
 
 
 """
-CUDA_VISIBLE_DEVICES=7 python inference/check_distribution.py
+CUDA_VISIBLE_DEVICES=7 python modules/check_distribution.py
 
 [지표별 해석]
 Per-dim mean Δ (L2) = 24.51:

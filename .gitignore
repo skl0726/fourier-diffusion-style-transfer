@@ -4,8 +4,11 @@ __pycache__
 latent_diffusion.egg-info
 images/
 
+# dataset
+dataset/wikiart/
+
 # LDM parameters
 models/ldm/stable-diffusion-v1-4/sd-v1-4.ckpt
 models/ldm/stable-diffusion-v1-5/v1-5-pruned.safetensors
-# models/ldm/stable-diffusion-v1-5-stage1/model.safetensors
-# models/ldm/stable-diffusion-v1-5-stage2/model.safetensors
+# models/attention/style-encoder/model.pt
+# models/ldm/stable-diffusion-v1-5-fft/model.safetensors

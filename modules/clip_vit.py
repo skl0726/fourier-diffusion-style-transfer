@@ -8,7 +8,7 @@ _clip_proc = None
 _proj = None
 
 
-def clip_vit_encoder(img: Image.Image,
+def clip_vit_encoder(img, # PIL image or torch.Tensor
                      model_name="openai/clip-vit-large-patch14",
                      out_dim=768,
                      max_tokens=64,
@@ -24,10 +24,28 @@ def clip_vit_encoder(img: Image.Image,
         for p in list(_clip_model.parameters()) + list(_proj.parameters()):
             p.requires_grad_(False)
 
+    if isinstance(img, torch.Tensor):
+        if img.min() < 0:
+            img = (img + 1.0) / 2.0
+        
+        if img.dim() == 4:
+            img_list = []
+            for i in range(img.shape[0]):
+                img_np = img[i].permute(1, 2, 0).cpu().numpy()
+                img_np = (img_np * 255).astype('uint8')
+                pil_img = Image.fromarray(img_np)
+                img_list.append(pil_img)
+            img = img_list
+        elif img.dim() == 3:
+            img_np = img.permute(1, 2, 0).cpu().numpy()
+            img_np = (img_np * 255).astype('uint8')
+            img - Image.fromarray(img_np)
+
     inputs = _clip_proc(images=img, return_tensors="pt")
-    pixel_values = inputs["pixel_values"].to(device)
+    clip_input = inputs["pixel_values"].to(device)
+
     with torch.no_grad():
-        out = _clip_model(pixel_values=pixel_values)
+        out = _clip_model(pixel_values=clip_input)
         tokens = out.last_hidden_state[:, 1:, :]  # drop CLS
         B, N, C = tokens.shape
         if max_tokens is not None and N > max_tokens:
@@ -61,3 +79,9 @@ if __name__ == "__main__":
 
     print("Total params:", total_params)
     print("Trainable params:", trainable_params)
+
+
+"""
+Total params: 11027968
+Trainable params: 11027968
+"""

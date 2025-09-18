@@ -3,5 +3,6 @@
 transforms==4.46.3
 torchvision==0.19.1
 timm==1.0.19
+accelerate
 
 # 새로운 폴더 만들고 거기에 코드 넣은 다음 임포트할 때 인식 안 되면 다음과 같이 진행: "pip uninstall -y latent-diffusion && pip install -e ."

@@ -279,8 +279,6 @@ problem:
 - style 이미지를 condition으로 넣었을 때 제대로 동작하지 않음 (기존 style transfer 모델의 전형적인 output과는 다른 이미지가 출력)
 - content와 style 이미지를 모두 동일한 이미지로 사용했을 때에도, style 이미지를 다른 것을 사용했을 때와 비슷한 결과 출력
 
-stable diffusion의 u-net이 이해할 수 있는 style condition representation을 학습 (StyleSelfAttention 학습)
-
 idea:
 i)  stage 1 (training style encoder): ldm의 u-net이 이해할 수 있는 style condition representation을 학습 (StyleSelfAttention 학습)
 ii) stage 2 (fine-tuning denoising u-net): fourier transform 적용 (병렬 diffsuion)
