@@ -1,4 +1,5 @@
-import argparse, os
+import argparse, os, random
+import numpy as np
 from PIL import Image
 from omegaconf import OmegaConf
 
@@ -205,8 +206,9 @@ def main(args):
 
     # self-attention network (after clip vit encoder)
     style_encoder = StyleSelfAttention(dim=768, nhead=8, nlayers=2)
-    sd_selfattn = load_file(args.selfattn_model_path, device="cpu")
-    load_res = style_encoder.load_state_dict(sd_selfattn, strict=True)
+    if args.selfattn_model_path:
+        sd_selfattn = load_file(args.selfattn_model_path, device="cpu")
+        style_encoder.load_state_dict(sd_selfattn, strict=True)
     style_encoder = style_encoder.to(device).eval()
     
     style_tokens = style_encoder(tokens)
@@ -217,12 +219,25 @@ def main(args):
         return x if x.shape[0] == B else x.expand(B, -1, -1)
 
     B = start_latents.shape[0]
-    uncond_text = match_batch(uncond_text.to(device), B)
+    uncond_text = uncond_text.expand(B, 77, -1)
     style_tokens = match_batch(style_tokens.to(device, dtype=uncond_text.dtype), B)
+
+    print("********cond shape:", style_tokens.shape, "uncond shape:", uncond_text.shape)
 
     num_layers = 25 # number of SD-1.x UNet cross-attention layer
     cond   = {"c_crossattn": [args.sty_alpha * style_tokens]  * num_layers}
     uncond = {"c_crossattn": [uncond_text] * num_layers}
+
+    def _extract_tensor_from_cond(c):
+        if isinstance(c, dict):
+            c2 = c.get("c_crossattn", c)
+            if isinstance(c2, list):
+                return c2[0]
+            return c2
+        return c
+
+    cond = _extract_tensor_from_cond(cond)
+    uncond = _extract_tensor_from_cond(uncond)
     # ********************************
     
     # 3) DDIM Sampling
@@ -233,7 +248,7 @@ def main(args):
         start_step=start_step,
         cond=cond,
         uncond=uncond,
-        guidance_scale=1.0, # fix
+        guidance_scale=args.guidance_scale,
         ddim_steps=args.ddim_steps,
         ddim_eta=args.ddim_eta,
     )
@@ -251,11 +266,19 @@ def main(args):
 
 
 if __name__ == "__main__":
+    SEED = 1234
+    os.environ['PYTHONHASHSEED'] = str(SEED)
+    random.seed(SEED)
+    np.random.seed(SEED)
+    torch.manual_seed(SEED)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(SEED)
+
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--ldm_config_path", type=str, default="models/ldm/stable-diffusion-v1-5/v1-inference.yaml")
     parser.add_argument("--ldm_model_path", type=str, default="models/ldm/stable-diffusion-v1-5/v1-5-pruned.safetensors")
-    parser.add_argument("--selfattn_model_path", type=str, default="models/attention/style-encoder/style_encoder_1000.safetensors")
+    parser.add_argument("--selfattn_model_path", type=str, default="models/attention/style-encoder/style_encoder_5000.safetensors")
     
     parser.add_argument("--cnt_img", type=str, default="images/inputs/cnt/cnt_1.png")
     parser.add_argument("--sty_img", type=str, default="images/inputs/sty/sty_1.png")
@@ -263,6 +286,7 @@ if __name__ == "__main__":
     parser.add_argument("--output_img", type=str, default="images/outputs/img2img_style/stylized.png")
     parser.add_argument("--prompt", type=str, default="")
     parser.add_argument("--negative_prompt", type=str, default="")
+    parser.add_argument("--guidance_scale", type=float, default=3)
     parser.add_argument("--strength", type=float, default=0.2)
     parser.add_argument("--ddim_steps", type=int, default=100)
     parser.add_argument("--ddim_eta", type=float, default=0.0)
@@ -274,8 +298,8 @@ if __name__ == "__main__":
 """
 CUDA_VISIBLE_DEVICES=1 python inference/img2img_style.py \
   --cnt_img images/inputs/cnt/cnt_1.png \
-  --sty_img images/inputs/sty/sty_4.png \
-  --output_img images/outputs/img2img_style/stylized_4.png \
+  --sty_img images/inputs/cnt/cnt_1.png \
+  --output_img images/outputs/img2img_style/reconstruct_test.png \
   --strength 0.4 \
   --ddim_steps 100
 """
