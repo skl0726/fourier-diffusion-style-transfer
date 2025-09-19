@@ -3,6 +3,7 @@
 __pycache__
 latent_diffusion.egg-info
 images/
+nohup.out
 
 # dataset
 dataset/wikiart/
@@ -10,5 +11,5 @@ dataset/wikiart/
 # LDM parameters
 models/ldm/stable-diffusion-v1-4/sd-v1-4.ckpt
 models/ldm/stable-diffusion-v1-5/v1-5-pruned.safetensors
-# models/attention/style-encoder/model.pt
+models/attention/style-encoder/
 # models/ldm/stable-diffusion-v1-5-fft/model.safetensors

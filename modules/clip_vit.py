@@ -27,6 +27,7 @@ def clip_vit_encoder(img, # PIL image or torch.Tensor
     if isinstance(img, torch.Tensor):
         if img.min() < 0:
             img = (img + 1.0) / 2.0
+        img = img.clamp(0.0, 1.0)
         
         if img.dim() == 4:
             img_list = []
@@ -39,7 +40,7 @@ def clip_vit_encoder(img, # PIL image or torch.Tensor
         elif img.dim() == 3:
             img_np = img.permute(1, 2, 0).cpu().numpy()
             img_np = (img_np * 255).astype('uint8')
-            img - Image.fromarray(img_np)
+            img = Image.fromarray(img_np)
 
     inputs = _clip_proc(images=img, return_tensors="pt")
     clip_input = inputs["pixel_values"].to(device)

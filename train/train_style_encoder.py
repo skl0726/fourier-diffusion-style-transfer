@@ -7,6 +7,7 @@ import torch
 from torch.utils.data import DataLoader
 from torchvision import transforms as T
 from torchvision.datasets import ImageFolder
+from safetensors.torch import save_file, load_file 
 
 from diffusers import StableDiffusionPipeline, DDIMScheduler
 from ldm.models.diffusion.ddim import DDIMSampler
@@ -49,11 +50,6 @@ def train(args):
         sd = torch.load(model_path, map_location="cpu")["state_dict"]
     ldm_model.load_state_dict(sd, strict=False)
     ldm_model = ldm_model.to(device).eval()
-
-    # freeze UNet parameters
-    # for param in ldm_model.parameters():
-    #     param.requires_grad = False
-
     sampler = DDIMSampler(ldm_model)
 
     # instantiate style encoder (trainable)
@@ -106,13 +102,16 @@ def train(args):
             style_tokens = style_encoder(raw_tokens)
 
             # 5) normalize tokens
-            #style_tokens = style_tokens / (style_tokens.std(dim=-1, keepdim=True) + 1e-6)
+            # style_tokens = style_tokens / (style_tokens.std(dim=-1, keepdim=True) + 1e-6)
             with torch.no_grad():
                 sample_text = ldm_model.get_learned_conditioning([""])
                 text_norm = sample_text.norm(dim=-1).mean()
-            style_norm = style_tokens.norm(dim=-1).mean()
-            style_tokens = style_tokens * (text_norm / (style_norm + 1e-6))
-            cond = {"c_crossattn": [style_tokens]}
+                style_norm = style_tokens.norm(dim=-1).mean()
+            scale = (text_norm / (style_norm + 1e-6)).detach()
+            style_tokens = style_tokens * scale
+
+            num_layers = 25
+            cond = {"c_crossattn": [style_tokens] * num_layers}
 
             # 6) predict noise
             pred = sampler.model.apply_model(z_t, timesteps, cond)
@@ -121,9 +120,11 @@ def train(args):
             loss = torch.nn.functional.mse_loss(pred, noise)
 
             optimizer.zero_grad()
-            # loss.backward()
-            grad_style = torch.autograd.grad(loss, style_tokens, retain_graph=False, allow_unused=False)[0]
-            style_tokens.backward(grad_style)
+            loss.backward()
+            for p in sampler.model.parameters():
+                p.grad = None
+            # grad_style = torch.autograd.grad(loss, style_tokens, retain_graph=False, allow_unused=False)[0]
+            # style_tokens.backward(grad_style)
             torch.nn.utils.clip_grad_norm_(style_encoder.parameters(), 1.0)
             optimizer.step()
 
@@ -132,7 +133,10 @@ def train(args):
             pbar.set_description(f"step {global_step} loss {loss.item():.6f}")
 
             if global_step % args.save_every == 0:
-                torch.save(style_encoder.state_dict(), os.path.join(args.save_dir, f"style_encoder_{global_step}.pt"))
+                # torch.save(style_encoder.state_dict(), os.path.join(args.save_dir, f"style_encoder_{global_step}.pt"))
+                os.makedirs(args.save_dir, exist_ok=True)
+                save_path = os.path.join(args.save_dir, f"style_encoder_{global_step}.safetensors")
+                save_file(style_encoder.state_dict(), save_path)
 
             if global_step >= args.max_steps:
                 break
@@ -141,7 +145,10 @@ def train(args):
             break
 
     pbar.close()
-    torch.save(style_encoder.state_dict(), os.path.join(args.save_dir, "style_encoder_final.pt"))
+    # torch.save(style_encoder.state_dict(), os.path.join(args.save_dir, "style_encoder_final.pt"))
+    os.makedirs(args.save_dir, exist_ok=True)
+    save_path = os.path.join(args.save_dir, f"style_encoder_{global_step}.safetensors")
+    save_file(style_encoder.state_dict(), save_path)
     print("===== ✅ Training done. =====")
 
 
@@ -153,13 +160,13 @@ if __name__ == "__main__":
     parser.add_argument("--nhead", type=int, default=8)
     parser.add_argument("--nlayers", type=int, default=2)
     parser.add_argument("--image_size", type=int, default=512)
-    parser.add_argument("--batch_size", type=int, default=2)
+    parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-6)
-    parser.add_argument("--max_steps", type=int, default=10000)
+    parser.add_argument("--max_steps", type=int, default=20000)
     parser.add_argument("--max_tokens", type=int, default=77)
     parser.add_argument("--save_every", type=int, default=1000)
-    parser.add_argument("--save_dir", type=str, default="models/attention/style_encoder")
-    parser.add_argument("--data_root", type=str, required=True)
+    parser.add_argument("--save_dir", type=str, default="models/attention/style-encoder")
+    parser.add_argument("--data_root", type=str, required=True) # /data/lfs/sekwang/wikiart
 
 
     args = parser.parse_args()
@@ -168,6 +175,11 @@ if __name__ == "__main__":
 
 """
 python train/train_style_encoder.py --data_root dataset/wikiart
+CUDA_VISIBLE_DEVICES=5 python train/train_style_encoder.py --data_root /data/lfs/sekwang/wikiart
+CUDA_VISIBLE_DEVICES=5 nohup python train/train_style_encoder.py --data_root /data/lfs/sekwang/wikiart &
+
+## stage 1 (training style encoder) ##
+"ldm의 u-net이 이해할 수 있는 style condition representation을 학습 (StyleSelfAttention 학습)"
 
 - 모델 파라미터 pt / ckpt 말고 safetensors로 만들 수 있는지?
 - 기존의 학습된 파라미터를 불러와서 다시 학습할 수 있는지?

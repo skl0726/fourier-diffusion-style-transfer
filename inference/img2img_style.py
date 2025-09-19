@@ -1,8 +1,10 @@
 import argparse, os
-import torch
 from PIL import Image
 from omegaconf import OmegaConf
+
+import torch
 from torchvision import transforms as T
+from safetensors.torch import load_file
 
 from diffusers import StableDiffusionPipeline, DDIMScheduler
 
@@ -151,20 +153,19 @@ def main(args):
     pipe = pipe.to(device)
 
     # load model (for DDIM Sampling)
-    CONFIG_PATH = "models/ldm/stable-diffusion-v1-5/v1-inference.yaml"      # TODO: set config path
-    CKPT_PATH = "models/ldm/stable-diffusion-v1-5/v1-5-pruned.safetensors"  # TODO: set model checkpoint path
+    CONFIG_PATH = args.ldm_config_path
+    MODEL_PATH = args.ldm_model_path
 
-    print(f"===== Loading Latent Diffusion model from: {CKPT_PATH} =====")
+    print(f"===== Loading Latent Diffusion model from: {MODEL_PATH} =====")
     config = OmegaConf.load(CONFIG_PATH)
     ldm_model = instantiate_from_config(config.model)
 
-    if CKPT_PATH.endswith(".safetensors"):
+    if MODEL_PATH.endswith(".safetensors"):
         # parameters type: ".safetensors"
-        from safetensors.torch import load_file
-        sd = load_file(CKPT_PATH, device="cpu")
+        sd = load_file(MODEL_PATH, device="cpu")
     else:
         # parameters type: ".ckpt"
-        sd = torch.load(CKPT_PATH, map_location="cpu")["state_dict"]
+        sd = torch.load(MODEL_PATH, map_location="cpu")["state_dict"]
     
     ldm_model.load_state_dict(sd, strict=False)
     ldm_model = ldm_model.to(device).eval()
@@ -200,10 +201,14 @@ def main(args):
         out_dim=768,
         max_tokens=77
     ) # (1, N_style, 768)
-    tokens = tokens / tokens.std(dim=-1, keepdim=True) # normalize
+    # tokens = tokens / tokens.std(dim=-1, keepdim=True) # normalize
 
     # self-attention network (after clip vit encoder)
-    style_encoder = StyleSelfAttention(dim=768, nhead=8, nlayers=2).to(device)
+    style_encoder = StyleSelfAttention(dim=768, nhead=8, nlayers=2)
+    sd_selfattn = load_file(args.selfattn_model_path, device="cpu")
+    load_res = style_encoder.load_state_dict(sd_selfattn, strict=True)
+    style_encoder = style_encoder.to(device).eval()
+    
     style_tokens = style_encoder(tokens)
 
     uncond_text = ldm_model.get_learned_conditioning([args.negative_prompt]) # (1, N_txt=77, 768)
@@ -248,6 +253,10 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
+    parser.add_argument("--ldm_config_path", type=str, default="models/ldm/stable-diffusion-v1-5/v1-inference.yaml")
+    parser.add_argument("--ldm_model_path", type=str, default="models/ldm/stable-diffusion-v1-5/v1-5-pruned.safetensors")
+    parser.add_argument("--selfattn_model_path", type=str, default="models/attention/style-encoder/style_encoder_1000.safetensors")
+    
     parser.add_argument("--cnt_img", type=str, default="images/inputs/cnt/cnt_1.png")
     parser.add_argument("--sty_img", type=str, default="images/inputs/sty/sty_1.png")
     parser.add_argument("--sty_alpha", type=float, default=1.0)
@@ -263,7 +272,7 @@ if __name__ == "__main__":
 
 
 """
-CUDA_VISIBLE_DEVICES=7 python inference/img2img_style.py \
+CUDA_VISIBLE_DEVICES=1 python inference/img2img_style.py \
   --cnt_img images/inputs/cnt/cnt_1.png \
   --sty_img images/inputs/sty/sty_4.png \
   --output_img images/outputs/img2img_style/stylized_4.png \
@@ -284,5 +293,5 @@ i)  stage 1 (training style encoder): ldm의 u-net이 이해할 수 있는 style
 ii) stage 2 (fine-tuning denoising u-net): fourier transform 적용 (병렬 diffsuion)
 
 todo:
-- stage 1을 위한 학습 준비하기 -> StyleSelfAttention training & Denoising U-Net fine-tuning, style image dataset 확보
+- 체크해야 할 사항: cnt + sty 잘 반영되는지 / cnt + cnt일 때 원본 이미지 그대로 복구하는지
 """
