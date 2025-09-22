@@ -1,13 +1,17 @@
-import argparse, os
-import torch
+import argparse, os, random
+import numpy as np
 from PIL import Image
 from omegaconf import OmegaConf
+
+import torch
 from torchvision import transforms as T
+from safetensors.torch import load_file
 
 from diffusers import StableDiffusionPipeline, DDIMScheduler
 
 from ldm.models.diffusion.ddim import DDIMSampler
 from ldm.util import instantiate_from_config
+from modules.clip_vit import clip_vit_encoder, StyleSelfAttention
 
 
 def pil_to_latents(pil_img: Image.Image, pipe, device):
@@ -229,9 +233,9 @@ if __name__ == "__main__":
 
 
 """
-python scripts/img2img.py \
-  --input images/inputs/input.png \
-  --output images/outputs/img2img/input_restored.png \
+CUDA_VISIBLE_DEVICES=1 python inference/img2img.py \
+  --input _data/cnt/cnt1.png \
+  --output _outputs/test.png \
   --strength 0.2 \
   --ddim_steps 100
 """

@@ -99,11 +99,14 @@ def ddim_invert_latents(device,
 
 @torch.no_grad()
 def ddim_sample_from_inverted(device,
+                              model,
                               sampler,
                               start_latents,
                               start_step,
                               cond,
                               uncond,
+                              prompt,
+                              negative_prompt,
                               guidance_scale,
                               ddim_steps,
                               ddim_eta):
@@ -114,8 +117,10 @@ def ddim_sample_from_inverted(device,
 
     sampler.make_schedule(ddim_num_steps=ddim_steps, ddim_eta=ddim_eta)
 
-    # cond = model.get_learned_conditioning([prompt if prompt is not None else ""])
-    # uncond = model.get_learned_conditioning([negative_prompt if negative_prompt is not None else ""])
+    if cond is None:
+        cond = model.get_learned_conditioning([prompt if prompt is not None else ""])
+    if uncond is None:
+        uncond = model.get_learned_conditioning([negative_prompt if negative_prompt is not None else ""])
     latents = start_latents.clone()
 
     batch_size = start_latents.shape[0]
@@ -188,66 +193,75 @@ def main(args):
     )
 
     total_steps = len(inverted_latents_seq) - 1
-    start_step = max(0, min(total_steps - 1, int(args.strength * total_steps)))
+    start_step = max(0, min(total_steps, int(args.strength * total_steps)))
     start_latents = inverted_latents_seq[start_step]
 
 
     # ***** style injection test *****
-    style_img = Image.open(args.sty_img).convert("RGB")
+    if args.sty_img:
+        style_img = Image.open(args.sty_img).convert("RGB")
 
-    # clip vit encoder
-    tokens = clip_vit_encoder(
-        style_img,
-        device=device,
-        out_dim=768,
-        max_tokens=77
-    ) # (1, N_style, 768)
-    # tokens = tokens / tokens.std(dim=-1, keepdim=True) # normalize
+        # clip vit encoder
+        tokens = clip_vit_encoder(
+            style_img,
+            device=device,
+            out_dim=768,
+            max_tokens=77
+        ) # (1, N_style, 768)
+        # tokens = tokens / tokens.std(dim=-1, keepdim=True) # normalize
 
-    # self-attention network (after clip vit encoder)
-    style_encoder = StyleSelfAttention(dim=768, nhead=8, nlayers=2)
-    if args.selfattn_model_path:
-        sd_selfattn = load_file(args.selfattn_model_path, device="cpu")
-        style_encoder.load_state_dict(sd_selfattn, strict=True)
-    style_encoder = style_encoder.to(device).eval()
-    
-    style_tokens = style_encoder(tokens)
+        # self-attention network (after clip vit encoder)
+        style_encoder = StyleSelfAttention(dim=768, nhead=8, nlayers=2)
+        if args.selfattn_model_path:
+            sd_selfattn = load_file(args.selfattn_model_path, device="cpu")
+            style_encoder.load_state_dict(sd_selfattn, strict=True)
+        style_encoder = style_encoder.to(device).eval()
+        
+        style_tokens = style_encoder(tokens)
 
-    uncond_text = ldm_model.get_learned_conditioning([args.negative_prompt]) # (1, N_txt=77, 768)
+        uncond_text = ldm_model.get_learned_conditioning([args.negative_prompt]) # (1, N_txt=77, 768)
 
-    def match_batch(x, B):
-        return x if x.shape[0] == B else x.expand(B, -1, -1)
+        def match_batch(x, B):
+            return x if x.shape[0] == B else x.expand(B, -1, -1)
 
-    B = start_latents.shape[0]
-    uncond_text = uncond_text.expand(B, 77, -1)
-    style_tokens = match_batch(style_tokens.to(device, dtype=uncond_text.dtype), B)
+        B = start_latents.shape[0]
+        uncond_text = uncond_text.expand(B, 77, -1)
+        style_tokens = match_batch(style_tokens.to(device, dtype=uncond_text.dtype), B)
 
-    print("********cond shape:", style_tokens.shape, "uncond shape:", uncond_text.shape)
+        num_layers = 25 # number of SD-1.x UNet cross-attention layer
+        cond   = {"c_crossattn": [args.sty_alpha * style_tokens]  * num_layers}
+        uncond = {"c_crossattn": [uncond_text] * num_layers}
 
-    num_layers = 25 # number of SD-1.x UNet cross-attention layer
-    cond   = {"c_crossattn": [args.sty_alpha * style_tokens]  * num_layers}
-    uncond = {"c_crossattn": [uncond_text] * num_layers}
+        def _extract_tensor_from_cond(c):
+            if isinstance(c, dict):
+                c2 = c.get("c_crossattn", c)
+                if isinstance(c2, list):
+                    return c2[0]
+                return c2
+            return c
 
-    def _extract_tensor_from_cond(c):
-        if isinstance(c, dict):
-            c2 = c.get("c_crossattn", c)
-            if isinstance(c2, list):
-                return c2[0]
-            return c2
-        return c
-
-    cond = _extract_tensor_from_cond(cond)
-    uncond = _extract_tensor_from_cond(uncond)
+        cond = _extract_tensor_from_cond(cond)
+        uncond = _extract_tensor_from_cond(uncond)
+        prompt = None
+        negative_prompt = None
+    else:
+        cond = None
+        uncond = None
+        prompt = args.prompt
+        negative_prompt = args.negative_prompt
     # ********************************
     
     # 3) DDIM Sampling
     reconstructed_latents = ddim_sample_from_inverted(
         device=device,
+        model=ldm_model,
         sampler=sampler,
         start_latents=start_latents,
         start_step=start_step,
         cond=cond,
         uncond=uncond,
+        prompt=prompt,
+        negative_prompt=negative_prompt,
         guidance_scale=args.guidance_scale,
         ddim_steps=args.ddim_steps,
         ddim_eta=args.ddim_eta,
@@ -257,12 +271,20 @@ def main(args):
     output_pil = latents_to_pil(reconstructed_latents, pipe)
 
     # save image
-    outdir = os.path.dirname(args.output_img)
-    if not os.path.exists(outdir):
+    if not os.path.exists(args.output_dir):
         os.makedirs(outdir, exist_ok=True)
-    output_pil[0].save(args.output_img)
+    if args.sty_img:
+        cnt_filename = os.path.basename(args.cnt_img)
+        sty_filename = os.path.basename(args.sty_img)
+        cnt_name, _ = os.path.splitext(cnt_filename)
+        sty_name, _ = os.path.splitext(sty_filename)
+        output_pil[0].save(args.output_dir + cnt_name + "_stylized_" + sty_name + ".png")
+    else:
+        cnt_filename = os.path.basename(args.cnt_img)
+        cnt_name, _ = os.path.splitext(cnt_filename)
+        output_pil[0].save(args.output_dir + cnt_name + "_reconstructed.png")
 
-    print(f"✅ Saved stylized image to: {args.output_img}")
+    print(f"✅ Saved stylized image to: {args.output_dir}")
 
 
 if __name__ == "__main__":
@@ -280,13 +302,13 @@ if __name__ == "__main__":
     parser.add_argument("--ldm_model_path", type=str, default="models/ldm/stable-diffusion-v1-5/v1-5-pruned.safetensors")
     parser.add_argument("--selfattn_model_path", type=str, default="models/attention/style-encoder/style_encoder_20000.safetensors")
     
-    parser.add_argument("--cnt_img", type=str, default="images/inputs/cnt/cnt_1.png")
-    parser.add_argument("--sty_img", type=str, default="images/inputs/sty/sty_1.png")
+    parser.add_argument("--cnt_img", type=str, required=True)   # _data/cnt/<cnt_image_name>.png 
+    parser.add_argument("--sty_img", type=str, default="")      # _data/sty/<sty_image_name>.png 
     parser.add_argument("--sty_alpha", type=float, default=1.0)
-    parser.add_argument("--output_img", type=str, default="images/outputs/img2img_style/stylized.png")
+    parser.add_argument("--output_dir", type=str, default="_outputs/")
     parser.add_argument("--prompt", type=str, default="")
     parser.add_argument("--negative_prompt", type=str, default="")
-    parser.add_argument("--guidance_scale", type=float, default=3.5)
+    parser.add_argument("--guidance_scale", type=float, default=1.0)
     parser.add_argument("--strength", type=float, default=0.2)
     parser.add_argument("--ddim_steps", type=int, default=100)
     parser.add_argument("--ddim_eta", type=float, default=0.0)
@@ -297,10 +319,14 @@ if __name__ == "__main__":
 
 """
 CUDA_VISIBLE_DEVICES=1 python inference/img2img_style.py \
-  --cnt_img images/inputs/cnt/cnt_1.png \
-  --sty_img images/inputs/sty/sty_1.png \
-  --output_img images/outputs/img2img_style/stylized_1.png \
-  --strength 0.4 \
+  --cnt_img _data/cnt/cnt1.png \
+  --sty_img _data/sty/sty1.png \
+  --strength 0.2 \
+  --ddim_steps 100
+
+CUDA_VISIBLE_DEVICES=1 python inference/img2img_style.py \
+  --cnt_img _data/cnt/cnt1.png \
+  --strength 0.2 \
   --ddim_steps 100
 """
 

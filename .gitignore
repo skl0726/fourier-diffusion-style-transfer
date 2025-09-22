@@ -2,7 +2,6 @@
 .DS_Store
 __pycache__
 latent_diffusion.egg-info
-images/
 nohup.out
 
 # dataset
