@@ -278,7 +278,7 @@ if __name__ == "__main__":
 
     parser.add_argument("--ldm_config_path", type=str, default="models/ldm/stable-diffusion-v1-5/v1-inference.yaml")
     parser.add_argument("--ldm_model_path", type=str, default="models/ldm/stable-diffusion-v1-5/v1-5-pruned.safetensors")
-    parser.add_argument("--selfattn_model_path", type=str, default="models/attention/style-encoder/style_encoder_5000.safetensors")
+    parser.add_argument("--selfattn_model_path", type=str, default="models/attention/style-encoder/style_encoder_20000.safetensors")
     
     parser.add_argument("--cnt_img", type=str, default="images/inputs/cnt/cnt_1.png")
     parser.add_argument("--sty_img", type=str, default="images/inputs/sty/sty_1.png")
@@ -286,7 +286,7 @@ if __name__ == "__main__":
     parser.add_argument("--output_img", type=str, default="images/outputs/img2img_style/stylized.png")
     parser.add_argument("--prompt", type=str, default="")
     parser.add_argument("--negative_prompt", type=str, default="")
-    parser.add_argument("--guidance_scale", type=float, default=3)
+    parser.add_argument("--guidance_scale", type=float, default=3.5)
     parser.add_argument("--strength", type=float, default=0.2)
     parser.add_argument("--ddim_steps", type=int, default=100)
     parser.add_argument("--ddim_eta", type=float, default=0.0)
@@ -298,8 +298,8 @@ if __name__ == "__main__":
 """
 CUDA_VISIBLE_DEVICES=1 python inference/img2img_style.py \
   --cnt_img images/inputs/cnt/cnt_1.png \
-  --sty_img images/inputs/cnt/cnt_1.png \
-  --output_img images/outputs/img2img_style/reconstruct_test.png \
+  --sty_img images/inputs/sty/sty_1.png \
+  --output_img images/outputs/img2img_style/stylized_1.png \
   --strength 0.4 \
   --ddim_steps 100
 """
