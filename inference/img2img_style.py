@@ -48,13 +48,13 @@ def ddim_invert_latents(device,
                         pipe,
                         latents_0,
                         prompt,
+                        negative_prompt,
                         num_inference_steps=100,
-                        guidance_scale=1.0,
-                        negative_prompt=""):
+                        guidance_scale=1.0):
     """
     DDIM Inversion: push latents forward (t: 0 -> high)
     """
-    print("===== Starting DDIM Inversion using diffusers pipeline... =====")
+    print("========== Starting DDIM Inversion... ==========")
     
     # encode prompt with CFG
     do_cfg = guidance_scale > 1.0
@@ -76,12 +76,15 @@ def ddim_invert_latents(device,
 
     for i in range(len(timesteps) - 1):
         t_curr, t_next = timesteps[i], timesteps[i+1]
-        alpha_t, alpha_next = pipe.scheduler.alphas_cumprod[t_curr], pipe.scheduler.alphas_cumprod[t_next]
+        idx_t, idx_next = int(t_curr), int(t_next)
+        alphas = pipe.scheduler.alphas_cumprod.to(device)
+        alpha_t, alpha_next = alphas[idx_t], alphas[idx_next]
+        # alpha_t, alpha_next = pipe.scheduler.alphas_cumprod[t_curr], pipe.scheduler.alphas_cumprod[t_next]
         
         latent_in = torch.cat([latents, latents]) if do_cfg else latents
-        latent_in = pipe.scheduler.scale_model_input(latent_in, t_next)
+        latent_in = pipe.scheduler.scale_model_input(latent_in, t_curr)
 
-        noise_pred = pipe.unet(latent_in, t_next, encoder_hidden_states=text_embeds).sample
+        noise_pred = pipe.unet(latent_in, t_curr, encoder_hidden_states=text_embeds).sample
         if do_cfg:
             n_uncond, n_text = noise_pred.chunk(2)
             noise_pred = n_uncond + guidance_scale * (n_text - n_uncond)
@@ -93,7 +96,7 @@ def ddim_invert_latents(device,
         )
         intermediates.append(latents.clone())
 
-    print("===== DDIM Inversion complete. =====")
+    print("========== DDIM Inversion complete. ==========")
     return intermediates # list of latents at increasing noise levels
 
 
@@ -107,20 +110,21 @@ def ddim_sample_from_inverted(device,
                               uncond,
                               prompt,
                               negative_prompt,
+                              injected_features,
                               guidance_scale,
                               ddim_steps,
                               ddim_eta):
     """
     DDIM Sampling: sampling from an arbitrary start step (deterministic, eta=0)
     """
-    print(f"===== Starting Reverse Diffusion from step {start_step} using Latent Diffusion Model... =====")
+    print(f"========== Starting DDIM Sampling... ==========")
 
     sampler.make_schedule(ddim_num_steps=ddim_steps, ddim_eta=ddim_eta)
 
     if cond is None:
-        cond = model.get_learned_conditioning([prompt if prompt is not None else ""])
+        cond = model.get_learned_conditioning([prompt])
     if uncond is None:
-        uncond = model.get_learned_conditioning([negative_prompt if negative_prompt is not None else ""])
+        uncond = model.get_learned_conditioning([negative_prompt])
     latents = start_latents.clone()
 
     batch_size = start_latents.shape[0]
@@ -139,7 +143,7 @@ def ddim_sample_from_inverted(device,
             unconditional_conditioning=uncond
         )
 
-    print("===== Reverse Diffusion complete. =====")
+    print("========== Reverse Diffusion complete. ==========")
     return latents
 
 
@@ -150,35 +154,39 @@ def main(args):
         torch.device("mps") if torch.backends.mps.is_available() else
         torch.device("cpu")
     )
-    print(f"===== device: {device} =====")
+    print(f"========== device: {device} ==========")
 
-    # load model (for DDIM Inversion)
-    print("===== Loading Hugging Face diffusers pipeline for VAE and Inversion... =====")
-    pipe = StableDiffusionPipeline.from_pretrained("runwayml/stable-diffusion-v1-5")
-    pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
-    pipe = pipe.to(device)
-
-    # load model (for DDIM Sampling)
+    # stable diffusion v1.5 parameters
     CONFIG_PATH = args.ldm_config_path
     MODEL_PATH = args.ldm_model_path
 
-    print(f"===== Loading Latent Diffusion model from: {MODEL_PATH} =====")
+    # load model (for DDIM Inversion - diffusion process)
+    print("========== [DDIM Inversion] Loading Hugging Face diffusers pipeline for VAE and Inversion... ==========")
+    # pipe = StableDiffusionPipeline.from_pretrained("runwayml/stable-diffusion-v1-5")
+    # pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
+    pipe = StableDiffusionPipeline.from_single_file(
+        args.ldm_model_path,
+        original_config_file=args.ldm_config_path,
+        torch_dtype=torch.float16 if torch.cuda.is_available() else None,
+    )
+    pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
+    pipe.to(device)
+
+    # load model (for DDIM Sampling - reverse diffusion process)
+    print(f"========== [DDIM Sampling] Loading Latent Diffusion model... ==========")
     config = OmegaConf.load(CONFIG_PATH)
     ldm_model = instantiate_from_config(config.model)
-
     if MODEL_PATH.endswith(".safetensors"):
-        # parameters type: ".safetensors"
-        sd = load_file(MODEL_PATH, device="cpu")
+        sd = load_file(MODEL_PATH, device="cpu")                        # parameters type: ".safetensors"
     else:
-        # parameters type: ".ckpt"
-        sd = torch.load(MODEL_PATH, map_location="cpu")["state_dict"]
-    
+        sd = torch.load(MODEL_PATH, map_location="cpu")["state_dict"]   # parameters type: ".ckpt"
     ldm_model.load_state_dict(sd, strict=False)
     ldm_model = ldm_model.to(device).eval()
     sampler = DDIMSampler(ldm_model)
 
-    # 1) initial VAE encoding
     content_img = Image.open(args.cnt_img)
+
+    # 1) initial VAE encoding
     latents_0 = pil_to_latents(content_img, pipe, device)
 
     # 2) DDIM Inversion
@@ -242,14 +250,14 @@ def main(args):
 
         cond = _extract_tensor_from_cond(cond)
         uncond = _extract_tensor_from_cond(uncond)
-        prompt = None
-        negative_prompt = None
     else:
         cond = None
         uncond = None
-        prompt = args.prompt
-        negative_prompt = args.negative_prompt
     # ********************************
+    
+
+    injected_features = None
+
     
     # 3) DDIM Sampling
     reconstructed_latents = ddim_sample_from_inverted(
@@ -258,11 +266,12 @@ def main(args):
         sampler=sampler,
         start_latents=start_latents,
         start_step=start_step,
-        cond=cond,
-        uncond=uncond,
-        prompt=prompt,
-        negative_prompt=negative_prompt,
-        guidance_scale=args.guidance_scale,
+        cond=cond,      # 추후 삭제
+        uncond=uncond,  # 추후 삭제
+        prompt="",
+        negative_prompt="",
+        injected_features=injected_features, # style injection
+        guidance_scale=1.0, # fix
         ddim_steps=args.ddim_steps,
         ddim_eta=args.ddim_eta,
     )
@@ -272,17 +281,19 @@ def main(args):
 
     # save image
     if not os.path.exists(args.output_dir):
-        os.makedirs(outdir, exist_ok=True)
+        os.makedirs(args.output_dir, exist_ok=True)
     if args.sty_img:
         cnt_filename = os.path.basename(args.cnt_img)
         sty_filename = os.path.basename(args.sty_img)
         cnt_name, _ = os.path.splitext(cnt_filename)
         sty_name, _ = os.path.splitext(sty_filename)
-        output_pil[0].save(args.output_dir + cnt_name + "_stylized_" + sty_name + ".png")
+        out_path = os.path.join(args.output_dir, f"{cnt_name}_stylized_{sty_name}.png")
+        output_pil[0].save(out_path)
     else:
         cnt_filename = os.path.basename(args.cnt_img)
         cnt_name, _ = os.path.splitext(cnt_filename)
-        output_pil[0].save(args.output_dir + cnt_name + "_reconstructed.png")
+        out_path = os.path.join(args.output_dir, f"{cnt_name}_reconstructed.png")
+        output_pil[0].save(out_path)
 
     print(f"✅ Saved stylized image to: {args.output_dir}")
 
@@ -306,10 +317,7 @@ if __name__ == "__main__":
     parser.add_argument("--sty_img", type=str, default="")      # _data/sty/<sty_image_name>.png 
     parser.add_argument("--sty_alpha", type=float, default=1.0)
     parser.add_argument("--output_dir", type=str, default="_outputs/")
-    parser.add_argument("--prompt", type=str, default="")
-    parser.add_argument("--negative_prompt", type=str, default="")
-    parser.add_argument("--guidance_scale", type=float, default=1.0)
-    parser.add_argument("--strength", type=float, default=0.2)
+    parser.add_argument("--strength", type=float, default=0.4)
     parser.add_argument("--ddim_steps", type=int, default=100)
     parser.add_argument("--ddim_eta", type=float, default=0.0)
     
@@ -326,7 +334,7 @@ CUDA_VISIBLE_DEVICES=1 python inference/img2img_style.py \
 
 CUDA_VISIBLE_DEVICES=1 python inference/img2img_style.py \
   --cnt_img _data/cnt/cnt1.png \
-  --strength 0.2 \
+  --strength 0.4 \
   --ddim_steps 100
 """
 
@@ -334,14 +342,14 @@ CUDA_VISIBLE_DEVICES=1 python inference/img2img_style.py \
 """
 [MEMO]
 
-problem:
-- style 이미지를 condition으로 넣었을 때 제대로 동작하지 않음 (기존 style transfer 모델의 전형적인 output과는 다른 이미지가 출력)
-- content와 style 이미지를 모두 동일한 이미지로 사용했을 때에도, style 이미지를 다른 것을 사용했을 때와 비슷한 결과 출력
-
 idea:
 i)  stage 1 (training style encoder): ldm의 u-net이 이해할 수 있는 style condition representation을 학습 (StyleSelfAttention 학습)
 ii) stage 2 (fine-tuning denoising u-net): fourier transform 적용 (병렬 diffsuion)
 
-todo:
-- 체크해야 할 사항: cnt + sty 잘 반영되는지 / cnt + cnt일 때 원본 이미지 그대로 복구하는지
+고려해야 할 사항:
+- StyleID의 코드대로 style feature 삽입 로직 구현하기 (ddim.py, ddpm.py, openaimodel.py, attention.py)
+
+- ldm 학습 과정에서, ddim inversion의 매 step에서 주입된 noise와 denoising u-net의 매 step에서 예측한 noise를 MSE loss로 학습시키는 방식을 활용할 텐데,
+    ddim inversion의 매 step에서 어떻게 noise를 추출하는지? (지금은 diffusers 라이브러리 쓰고 있는데...)
+
 """

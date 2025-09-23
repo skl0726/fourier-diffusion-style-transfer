@@ -5,10 +5,9 @@ latent_diffusion.egg-info
 nohup.out
 
 # dataset
-dataset/wikiart/
+wikiart/
 
 # LDM parameters
-models/ldm/stable-diffusion-v1-4/sd-v1-4.ckpt
 models/ldm/stable-diffusion-v1-5/v1-5-pruned.safetensors
 models/attention/style-encoder/
-# models/ldm/stable-diffusion-v1-5-fft/model.safetensors
+#models/ldm/stable-diffusion-v1-5-fft/model.safetensors
