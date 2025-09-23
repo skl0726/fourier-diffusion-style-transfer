@@ -77,12 +77,14 @@ class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
     support it as an extra input.
     """
 
-    def forward(self, x, emb, context=None):
+    def forward(self, x, emb, context=None, self_attn_k_injected=None, self_attn_v_injected=None):
         for layer in self:
             if isinstance(layer, TimestepBlock):
                 x = layer(x, emb)
             elif isinstance(layer, SpatialTransformer):
-                x = layer(x, context)
+                x = layer(x, context,
+                          self_attn_k_injected=self_attn_k_injected,
+                          self_attn_v_injected=self_attn_v_injected)
             else:
                 x = layer(x)
         return x
@@ -707,7 +709,7 @@ class UNetModel(nn.Module):
         self.middle_block.apply(convert_module_to_f32)
         self.output_blocks.apply(convert_module_to_f32)
 
-    def forward(self, x, timesteps=None, context=None, y=None,**kwargs):
+    def forward(self, x, timesteps=None, context=None, y=None, injected_features=None, **kwargs):
         """
         Apply the model to an input batch.
         :param x: an [N x C x ...] Tensor of inputs.
@@ -733,8 +735,15 @@ class UNetModel(nn.Module):
             hs.append(h)
         h = self.middle_block(h, emb, context)
         for module in self.output_blocks:
+            self_attn_k_injected = None
+            self_attn_v_injected = None
+            if injected_features is not None:
+                self_attn_k_injected = injected_features['k']
+                self_attn_v_injected = injected_features['v']
             h = th.cat([h, hs.pop()], dim=1)
-            h = module(h, emb, context)
+            h = module(h, emb, context,
+                       self_attn_k_injected=self_attn_k_injected,
+                       self_attn_v_injected=self_attn_v_injected)
         h = h.type(x.dtype)
         if self.predict_codebook_ids:
             return self.id_predictor(h)

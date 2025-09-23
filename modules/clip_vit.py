@@ -72,6 +72,39 @@ class StyleSelfAttention(nn.Module):
         return self.encoder(tokens)
 
 
+"""
+# 내부에 있는 모듈(예: attention 클래스)의 멤버 정의 예
+self.num_heads = num_heads
+self.head_dim = head_dim
+self.dim = num_heads * head_dim
+
+# injected features -> k/v projection (사용자가 만든 모듈로 정의)
+# 만약 injected_features가 (B, C, H, W)라면 1x1 conv + flatten을 사용해도 됨.
+self.to_k_inj = nn.Linear(in_feat_dim, self.dim)  # 만약 feat flattened된 벡터라면 Linear
+self.to_v_inj = nn.Linear(in_feat_dim, self.dim)
+
+# --- 변환 함수 ---
+def project_injected_to_kv(injected_features):
+    # injected_features: [B, C, H, W] 또는 [B, seq_s, feat_dim]
+    if injected_features.dim() == 4:
+        B, C, H, W = injected_features.shape
+        feat = injected_features.view(B, C, H*W).permute(0, 2, 1)  # [B, seq_s, feat_dim=C]
+    else:
+        # already [B, seq_s, feat_dim]
+        feat = injected_features  # [B, seq_s, feat_dim]
+    B, seq_s, feat_dim = feat.shape
+
+    k_proj = self.to_k_inj(feat)  # [B, seq_s, dim]
+    v_proj = self.to_v_inj(feat)  # [B, seq_s, dim]
+
+    # reshape to multi-head: [B, seq_s, num_heads, head_dim] -> [B, num_heads, seq_s, head_dim]
+    k_proj = k_proj.view(B, seq_s, self.num_heads, self.head_dim).permute(0,2,1,3).contiguous()
+    v_proj = v_proj.view(B, seq_s, self.num_heads, self.head_dim).permute(0,2,1,3).contiguous()
+
+    return {'k': k_proj, 'v': v_proj}  # shapes: [B, num_heads, seq_s, head_dim]
+"""
+
+
 if __name__ == "__main__":
     attn = StyleSelfAttention(dim=768, nhead=8, nlayers=2, dim_feedforward=2048, dropout=0.1)
 

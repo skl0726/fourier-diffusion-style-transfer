@@ -167,7 +167,9 @@ class CrossAttention(nn.Module):
             nn.Dropout(dropout)
         )
 
-    def forward(self, x, context=None, mask=None):
+    def forward(self, x, context=None, mask=None,
+                k_injected=None,
+                v_injected=None):
         h = self.heads
 
         q = self.to_q(x)
@@ -175,21 +177,42 @@ class CrossAttention(nn.Module):
         k = self.to_k(context)
         v = self.to_v(context)
 
+        """
+        [k, v 합치는 전략: separate-attention then fuse outputs]
+            out_cond = attn(q, k_cond, v_cond)
+            out_style = attn(q, k_style, v_style)
+            out = out_cond * (1-a) + out_style * a
+        --> style attn layer만 따로 어떻게 학습을 할 것인지? - attention은 단순 계산이고, nn.Linear만 바깥으로 빼기
+        --> 이렇게 하고 분포 매칭(KL divergence 등)까지 적용해보면 좋을 것 같음
+        """
+
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h=h), (q, k, v))
 
+        # original attention
         sim = einsum('b i d, b j d -> b i j', q, k) * self.scale
-
         if exists(mask):
             mask = rearrange(mask, 'b ... -> b (...)')
             max_neg_value = -torch.finfo(sim.dtype).max
             mask = repeat(mask, 'b j -> (b h) () j', h=h)
             sim.masked_fill_(~mask, max_neg_value)
-
-        # attention, what we cannot get enough of
         attn = sim.softmax(dim=-1)
-
         out = einsum('b i j, b j d -> b i d', attn, v)
-        out = rearrange(out, '(b h) n d -> b n (h d)', h=h)
+        out_cond = rearrange(out, '(b h) n d -> b n (h d)', h=h)
+
+        # style attention
+        out_style = None
+        if (k_injected is not None) and (v_injected is not None): # k_injected, v_injected는 nn.Linear()를 거친 feature
+            sim_s = einsum('b i d, b j d -> b i j', q, k_injected) * self.scale # k_injected, v_injected를 attention-ready shape로 맞추는 작업 필요?? ((b*h), n_style, d) (안 되면 GPT 참고)
+            attn_s = sim_s.softmax(dim=-1)
+            out_style = einsum('b i j, b j d -> b i d', attn_s, v_injected)
+
+        # fuse outputs
+        if out_style is None:
+            out = out_cond
+        else:
+            sty_alpha = 0.1 # 추후 함수 파라미터로 빼기
+            out = out_cond * (1.0 - sty_alpha) + out_style * sty_alpha
+
         return self.to_out(out)
 
 
@@ -205,11 +228,19 @@ class BasicTransformerBlock(nn.Module):
         self.norm3 = nn.LayerNorm(dim)
         self.checkpoint = checkpoint
 
-    def forward(self, x, context=None):
-        return checkpoint(self._forward, (x, context), self.parameters(), self.checkpoint)
+    def forward(self, x, context=None,
+                self_attn_k_injected=None,
+                self_attn_v_injected=None):
+        return checkpoint(self._forward, (x, context,
+                                          self_attn_k_injected,
+                                          self_attn_v_injected,), self.parameters(), self.checkpoint)
 
-    def _forward(self, x, context=None):
-        x = self.attn1(self.norm1(x)) + x
+    def _forward(self, x, context=None,
+                 self_attn_k_injected=None,
+                 self_attn_v_injected=None):
+        x = self.attn1(self.norm1(x),
+                       k_injected=self_attn_k_injected,
+                       v_injected=self_attn_v_injected) + x
         x = self.attn2(self.norm2(x), context=context) + x
         x = self.ff(self.norm3(x)) + x
         return x
@@ -247,7 +278,9 @@ class SpatialTransformer(nn.Module):
                                               stride=1,
                                               padding=0))
 
-    def forward(self, x, context=None):
+    def forward(self, x, context=None,
+                self_attn_k_injected=None,
+                self_attn_v_injected=None):
         # note: if no context is given, cross-attention defaults to self-attention
         b, c, h, w = x.shape
         x_in = x
@@ -255,7 +288,9 @@ class SpatialTransformer(nn.Module):
         x = self.proj_in(x)
         x = rearrange(x, 'b c h w -> b (h w) c')
         for block in self.transformer_blocks:
-            x = block(x, context=context)
+            x = block(x, context=context,
+                      self_attn_k_injected=self_attn_k_injected,
+                      self_attn_v_injected=self_attn_v_injected)
         x = rearrange(x, 'b (h w) c -> b c h w', h=h, w=w)
         x = self.proj_out(x)
         return x + x_in

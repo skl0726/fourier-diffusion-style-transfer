@@ -139,6 +139,7 @@ def ddim_sample_from_inverted(device,
             t=t,
             index=index,
             use_original_steps=False,
+            injected_features=injected_features,
             unconditional_guidance_scale=guidance_scale,
             unconditional_conditioning=uncond
         )
@@ -256,7 +257,7 @@ def main(args):
     # ********************************
     
 
-    injected_features = None
+    injected_features = None # dict {'k': k, 'v': v}로 나오도록 두기
 
     
     # 3) DDIM Sampling
