@@ -154,7 +154,7 @@ class CrossAttention(nn.Module):
         super().__init__()
         inner_dim = dim_head * heads
         context_dim = default(context_dim, query_dim)
-        self.test = {'heads': heads, 'dim_head': dim_head}
+        clip_feat_dim = 768 # clip vit encoder
 
         self.scale = dim_head ** -0.5
         self.heads = heads
@@ -163,6 +163,9 @@ class CrossAttention(nn.Module):
         self.to_k = nn.Linear(context_dim, inner_dim, bias=False)
         self.to_v = nn.Linear(context_dim, inner_dim, bias=False)
 
+        self.to_k_injected = nn.Linear(clip_feat_dim, inner_dim, bias=False)
+        self.to_v_injected = nn.Linear(clip_feat_dim, inner_dim, bias=False)
+
         self.to_out = nn.Sequential(
             nn.Linear(inner_dim, query_dim),
             nn.Dropout(dropout)
@@ -170,9 +173,9 @@ class CrossAttention(nn.Module):
 
     def forward(self, x, context=None, mask=None,
                 k_injected=None,
-                v_injected=None):
+                v_injected=None,
+                sty_alpha=None):
         h = self.heads
-        print(self.test)
 
         q = self.to_q(x)
         context = default(context, x)
@@ -198,22 +201,38 @@ class CrossAttention(nn.Module):
             mask = repeat(mask, 'b j -> (b h) () j', h=h)
             sim.masked_fill_(~mask, max_neg_value)
         attn = sim.softmax(dim=-1)
-        out = einsum('b i j, b j d -> b i d', attn, v)
-        out_cond = rearrange(out, '(b h) n d -> b n (h d)', h=h)
+        out_cond = einsum('b i j, b j d -> b i d', attn, v)
+        out_cond = rearrange(out_cond, '(b h) n d -> b n (h d)', h=h)
 
         # style attention
         out_style = None
-        if (k_injected is not None) and (v_injected is not None): # k_injected, v_injected는 nn.Linear()를 거친 feature
-            sim_s = einsum('b i d, b j d -> b i j', q, k_injected) * self.scale # k_injected, v_injected를 attention-ready shape로 맞추는 작업 필요?? ((b*h), n_style, d) (안 되면 GPT 참고)
+        if (k_injected is not None) and (v_injected is not None):
+            k_injected = self.to_k_injected(k_injected)
+            v_injected = self.to_v_injected(v_injected)
+            k_injected = rearrange(k_injected, 'b n (h d) -> (b h) n d', h=self.heads)
+            v_injected = rearrange(v_injected, 'b n (h d) -> (b h) n d', h=self.heads)
+            # if k_injected.shape[0] != q.shape[0]:
+            #     if q.shape[0] % k_injected.shape[0] == 0:
+            #         rep = q.shape[0] // k_injected.shape[0]
+            #         k_injected = k_injected.repeat(rep, 1, 1)
+            #         v_injected = v_injected.repeat(rep, 1, 1)
+            #     else:
+            #         rep = int(math.ceil(q.shape[0] / k_injected.shape[0]))
+            #         k_injected = k_injected.repeat(rep, 1, 1)[:q.shape[0], :, :]
+            #         v_injected = v_injected.repeat(rep, 1, 1)[:q.shape[0], :, :]
+            sim_s = einsum('b i d, b j d -> b i j', q, k_injected) * self.scale
             attn_s = sim_s.softmax(dim=-1)
             out_style = einsum('b i j, b j d -> b i d', attn_s, v_injected)
+            out_style = rearrange(out_style, '(b h) n d -> b n (h d)', h=h)
 
         # fuse outputs
         if out_style is None:
             out = out_cond
         else:
-            sty_alpha = 0.1 # 추후 함수 파라미터로 빼기
-            out = out_cond * (1.0 - sty_alpha) + out_style * sty_alpha
+            if sty_alpha is not None:
+                out = out_cond * (1.0 - sty_alpha) + out_style * sty_alpha
+            else:
+                out = out_cond * 0.9 + out_style * 0.1
 
         return self.to_out(out)
 
@@ -232,17 +251,21 @@ class BasicTransformerBlock(nn.Module):
 
     def forward(self, x, context=None,
                 self_attn_k_injected=None,
-                self_attn_v_injected=None):
+                self_attn_v_injected=None,
+                sty_alpha=None):
         return checkpoint(self._forward, (x, context,
                                           self_attn_k_injected,
-                                          self_attn_v_injected,), self.parameters(), self.checkpoint)
+                                          self_attn_v_injected,
+                                          sty_alpha), self.parameters(), self.checkpoint)
 
     def _forward(self, x, context=None,
                  self_attn_k_injected=None,
-                 self_attn_v_injected=None):
+                 self_attn_v_injected=None,
+                 sty_alpha=None):
         x = self.attn1(self.norm1(x),
                        k_injected=self_attn_k_injected,
-                       v_injected=self_attn_v_injected) + x
+                       v_injected=self_attn_v_injected,
+                       sty_alpha=sty_alpha) + x
         x = self.attn2(self.norm2(x), context=context) + x
         x = self.ff(self.norm3(x)) + x
         return x
@@ -282,7 +305,8 @@ class SpatialTransformer(nn.Module):
 
     def forward(self, x, context=None,
                 self_attn_k_injected=None,
-                self_attn_v_injected=None):
+                self_attn_v_injected=None,
+                sty_alpha=None):
         # note: if no context is given, cross-attention defaults to self-attention
         b, c, h, w = x.shape
         x_in = x
@@ -292,7 +316,8 @@ class SpatialTransformer(nn.Module):
         for block in self.transformer_blocks:
             x = block(x, context=context,
                       self_attn_k_injected=self_attn_k_injected,
-                      self_attn_v_injected=self_attn_v_injected)
+                      self_attn_v_injected=self_attn_v_injected,
+                      sty_alpha=sty_alpha)
         x = rearrange(x, 'b (h w) c -> b c h w', h=h, w=w)
         x = self.proj_out(x)
         return x + x_in

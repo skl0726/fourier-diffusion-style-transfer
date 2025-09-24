@@ -11,7 +11,7 @@ from diffusers import StableDiffusionPipeline, DDIMScheduler
 
 from ldm.models.diffusion.ddim import DDIMSampler
 from ldm.util import instantiate_from_config
-from modules.clip_vit import clip_vit_encoder, StyleSelfAttention
+from modules.clip_vit import StyleEncoder
 
 
 def pil_to_latents(pil_img: Image.Image, pipe, device):
@@ -106,8 +106,6 @@ def ddim_sample_from_inverted(device,
                               sampler,
                               start_latents,
                               start_step,
-                              cond,
-                              uncond,
                               prompt,
                               negative_prompt,
                               injected_features,
@@ -121,10 +119,8 @@ def ddim_sample_from_inverted(device,
 
     sampler.make_schedule(ddim_num_steps=ddim_steps, ddim_eta=ddim_eta)
 
-    if cond is None:
-        cond = model.get_learned_conditioning([prompt])
-    if uncond is None:
-        uncond = model.get_learned_conditioning([negative_prompt])
+    cond = model.get_learned_conditioning([prompt])
+    uncond = model.get_learned_conditioning([negative_prompt])
     latents = start_latents.clone()
 
     batch_size = start_latents.shape[0]
@@ -184,7 +180,13 @@ def main(args):
     ldm_model = ldm_model.to(device).eval()
     sampler = DDIMSampler(ldm_model)
 
-    content_img = Image.open(args.cnt_img)
+    # load style encoder module
+    style_encoder = StyleEncoder(device=device, sty_alpha=args.sty_alpha)
+
+    # load content and style images
+    content_img = Image.open(args.cnt_img).convert("RGB")
+    if args.sty_img:
+        style_img = Image.open(args.sty_img).convert("RGB")
 
     # 1) initial VAE encoding
     latents_0 = pil_to_latents(content_img, pipe, device)
@@ -204,70 +206,19 @@ def main(args):
     start_step = max(0, min(total_steps, int(args.strength * total_steps)))
     start_latents = inverted_latents_seq[start_step]
 
-
-    # ***** style injection test *****
+    # 3) get style image features
     if args.sty_img:
-        style_img = Image.open(args.sty_img).convert("RGB")
-
-        # clip vit encoder
-        tokens = clip_vit_encoder(
-            style_img,
-            device=device,
-            out_dim=768,
-            max_tokens=77
-        ) # (1, N_style, 768)
-        # tokens = tokens / tokens.std(dim=-1, keepdim=True) # normalize
-
-        # self-attention network (after clip vit encoder)
-        style_encoder = StyleSelfAttention(dim=768, nhead=8, nlayers=2)
-        if args.selfattn_model_path:
-            sd_selfattn = load_file(args.selfattn_model_path, device="cpu")
-            style_encoder.load_state_dict(sd_selfattn, strict=True)
-        style_encoder = style_encoder.to(device).eval()
-        
-        style_tokens = style_encoder(tokens)
-
-        uncond_text = ldm_model.get_learned_conditioning([args.negative_prompt]) # (1, N_txt=77, 768)
-
-        def match_batch(x, B):
-            return x if x.shape[0] == B else x.expand(B, -1, -1)
-
-        B = start_latents.shape[0]
-        uncond_text = uncond_text.expand(B, 77, -1)
-        style_tokens = match_batch(style_tokens.to(device, dtype=uncond_text.dtype), B)
-
-        num_layers = 25 # number of SD-1.x UNet cross-attention layer
-        cond   = {"c_crossattn": [args.sty_alpha * style_tokens]  * num_layers}
-        uncond = {"c_crossattn": [uncond_text] * num_layers}
-
-        def _extract_tensor_from_cond(c):
-            if isinstance(c, dict):
-                c2 = c.get("c_crossattn", c)
-                if isinstance(c2, list):
-                    return c2[0]
-                return c2
-            return c
-
-        cond = _extract_tensor_from_cond(cond)
-        uncond = _extract_tensor_from_cond(uncond)
+        injected_features = style_encoder(style_img) # dict{'k': k, 'v': v, 'sty_alpha': alpha}
     else:
-        cond = None
-        uncond = None
-    # ********************************
+        injected_features = None
     
-
-    injected_features = None # dict{'k': k, 'v': v, 'sty_alpha': alpha}
-
-    
-    # 3) DDIM Sampling
+    # 4) DDIM Sampling + style injection
     reconstructed_latents = ddim_sample_from_inverted(
         device=device,
         model=ldm_model,
         sampler=sampler,
         start_latents=start_latents,
         start_step=start_step,
-        cond=cond,      # 추후 삭제
-        uncond=uncond,  # 추후 삭제
         prompt="",
         negative_prompt="",
         injected_features=injected_features, # style injection
@@ -276,7 +227,7 @@ def main(args):
         ddim_eta=args.ddim_eta,
     )
 
-    # 4) final VAE decoding
+    # 5) final VAE decoding
     output_pil = latents_to_pil(reconstructed_latents, pipe)
 
     # save image
@@ -295,7 +246,7 @@ def main(args):
         out_path = os.path.join(args.output_dir, f"{cnt_name}_reconstructed.png")
         output_pil[0].save(out_path)
 
-    print(f"✅ Saved stylized image to: {args.output_dir}")
+    print(f"✅ Saved image to: {out_path}")
 
 
 if __name__ == "__main__":
@@ -315,7 +266,7 @@ if __name__ == "__main__":
     
     parser.add_argument("--cnt_img", type=str, required=True)   # _data/cnt/<cnt_image_name>.png 
     parser.add_argument("--sty_img", type=str, default="")      # _data/sty/<sty_image_name>.png 
-    parser.add_argument("--sty_alpha", type=float, default=1.0)
+    parser.add_argument("--sty_alpha", type=float, default=0.1)
     parser.add_argument("--output_dir", type=str, default="_outputs/")
     parser.add_argument("--strength", type=float, default=0.4)
     parser.add_argument("--ddim_steps", type=int, default=100)
@@ -328,8 +279,9 @@ if __name__ == "__main__":
 """
 CUDA_VISIBLE_DEVICES=1 python inference/img2img_style.py \
   --cnt_img _data/cnt/cnt1.png \
-  --sty_img _data/sty/sty1.png \
-  --strength 0.2 \
+  --sty_img _data/sty/sty4.png \
+  --sty_alpha 0.5 \
+  --strength 0.4 \
   --ddim_steps 100
 
 CUDA_VISIBLE_DEVICES=1 python inference/img2img_style.py \

@@ -77,14 +77,15 @@ class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
     support it as an extra input.
     """
 
-    def forward(self, x, emb, context=None, self_attn_k_injected=None, self_attn_v_injected=None):
+    def forward(self, x, emb, context=None, self_attn_k_injected=None, self_attn_v_injected=None, sty_alpha=None):
         for layer in self:
             if isinstance(layer, TimestepBlock):
                 x = layer(x, emb)
             elif isinstance(layer, SpatialTransformer):
                 x = layer(x, context,
                           self_attn_k_injected=self_attn_k_injected,
-                          self_attn_v_injected=self_attn_v_injected)
+                          self_attn_v_injected=self_attn_v_injected,
+                          sty_alpha=sty_alpha)
             else:
                 x = layer(x)
         return x
@@ -737,13 +738,16 @@ class UNetModel(nn.Module):
         for module in self.output_blocks:
             self_attn_k_injected = None
             self_attn_v_injected = None
+            sty_alpha = None
             if injected_features is not None:
                 self_attn_k_injected = injected_features['k']
                 self_attn_v_injected = injected_features['v']
+                sty_alpha = injected_features['sty_alpha']
             h = th.cat([h, hs.pop()], dim=1)
             h = module(h, emb, context,
                        self_attn_k_injected=self_attn_k_injected,
-                       self_attn_v_injected=self_attn_v_injected)
+                       self_attn_v_injected=self_attn_v_injected,
+                       sty_alpha=sty_alpha)
         h = h.type(x.dtype)
         if self.predict_codebook_ids:
             return self.id_predictor(h)

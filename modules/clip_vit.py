@@ -25,10 +25,7 @@ class StyleEncoder(nn.Module):
                 p.requires_grad = False
 
         clip_feat_dim = self.clip.config.hidden_size
-        inner_dim = dim_head * heads
         self.norm = nn.LayerNorm(clip_feat_dim) # optional
-        self.to_k_injected = nn.Linear(clip_feat_dim, inner_dim, bias=False)
-        self.to_v_injected = nn.Linear(clip_feat_dim, inner_dim, bias=False)
 
         self.preprocess = transforms.Compose([
             transforms.Resize(self.clip.config.image_size if hasattr(self.clip.config, "image_size") else 224),
@@ -37,6 +34,8 @@ class StyleEncoder(nn.Module):
             transforms.Normalize(mean=(0.48145466, 0.4578275, 0.40821073),
                                  std=(0.26862954, 0.26130258, 0.27577711))
         ])
+
+        self.to(self.device)
 
     def normalize_batch_tensor(self, images: torch.Tensor):
         if images.dtype == torch.uint8:
@@ -49,8 +48,8 @@ class StyleEncoder(nn.Module):
             # Note: torchvision transforms operate on PIL images or batched tensors differently; here we do simple resizing via F.interpolate if needed
             images = F.interpolate(images, size=(target_size, target_size), mode='bilinear', align_corners=False)
 
-        mean = torch.tensor([0.48145466, 0.4578275, 0.40821073], device=images.device).view(1, C, 1, 1)
-        std = torch.tensor([0.26862954, 0.26130258, 0.27577711], device=images.device).view(1, C, 1, 1)
+        mean = torch.tensor([0.48145466, 0.4578275, 0.40821073], device=self.device).view(1, C, 1, 1)
+        std = torch.tensor([0.26862954, 0.26130258, 0.27577711], device=self.device).view(1, C, 1, 1)
         images = (images - mean) / std
 
         return images
@@ -70,7 +69,7 @@ class StyleEncoder(nn.Module):
             batch = self.normalize_batch_tensor(images)
 
         outputs = self.clip(pixel_values=batch)
-        feats = outputs.last_hidden_size
+        feats = outputs.last_hidden_state
         if feats.shape[1] > 1:
             feats = feats[:, 1:, :] # remove cls token if present
         
@@ -78,17 +77,9 @@ class StyleEncoder(nn.Module):
 
     def forward(self, x):
         feats = self.extract_clip_patch_features(x)
-        B, seq, feat_dim = feats.shape
-
         feats = self.norm(feats)
 
-        k_proj = self.to_k_injected(feats)
-        v_proj = self.to_v_injected(feats)
-
-        k_proj = k_proj.view(B, seq, self.heads, self.dim_head).permute(0, 2, 1, 3).contiguous() # [B, seq_s, heads, dim_head] -> [B, heads, seq_s, head_dim]
-        v_proj = v_proj.view(B, seq, self.heads, self.dim_head).permute(0, 2, 1, 3).contiguous() # [B, seq_s, heads, dim_head] -> [B, heads, seq_s, head_dim]
-
-        return {'k': k_proj, 'v': v_proj, 'sty_alpha': self.sty_alpha}
+        return {'k': feats, 'v': feats, 'sty_alpha': self.sty_alpha}
 
 
 # import torch, torch.nn as nn
@@ -163,19 +154,3 @@ class StyleEncoder(nn.Module):
 
 #     def forward(self, tokens):
 #         return self.encoder(tokens)
-
-
-if __name__ == "__main__":
-    model = StyleEncoder(device=torch.device("cpu"))
-
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-
-    print("Total params:", total_params)
-    print("Trainable params:", trainable_params)
-
-
-"""
-Total params: 11027968
-Trainable params: 11027968
-"""
