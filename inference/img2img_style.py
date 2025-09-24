@@ -256,7 +256,7 @@ def main(args):
     # ********************************
     
 
-    injected_features = None # dict {'k': k, 'v': v}로 나오도록 두기
+    injected_features = None # dict{'k': k, 'v': v, 'sty_alpha': alpha}
 
     
     # 3) DDIM Sampling
