@@ -1,24 +1,24 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from einops import rearrange
 from torchvision import transforms
-from transformers import CLIPVisionModel, CLIPConfig, CLIPFeatureExtractor
+from transformers import CLIPVisionModel
+from PIL import Image
 
 
 class StyleEncoder(nn.Module):
     def __init__(self,
+                 device,
                  heads=8,
                  dim_head=64,
                  sty_alpha: float = 0.1,
                  clip_model_name: str = "openai/clip-vit-base-patch32",
-                 freeze_clip: bool = True,
-                 device=None):
+                 freeze_clip: bool = True):
         super().__init__()
         self.sty_alpha = sty_alpha
         self.device = device
 
-        self.clip = CLIPVisionModel.from_pretrained(clip_model_name)
+        self.clip = CLIPVisionModel.from_pretrained(clip_model_name).to(self.device)
         self.clip.eval()
         if freeze_clip:
             for p in self.clip.parameters():
@@ -33,22 +33,60 @@ class StyleEncoder(nn.Module):
         self.preprocess = transforms.Compose([
             transforms.Resize(self.clip.config.image_size if hasattr(self.clip.config, "image_size") else 224),
             transforms.CenterCrop(self.clip.config.image_size if hasattr(self.clip.config, "image_size") else 224),
+            transforms.ToTensor(),
             transforms.Normalize(mean=(0.48145466, 0.4578275, 0.40821073),
                                  std=(0.26862954, 0.26130258, 0.27577711))
         ])
 
+    def normalize_batch_tensor(self, images: torch.Tensor):
+        if images.dtype == torch.uint8:
+            images = images.float() / 255.0 # if input in 0..255 convert to 0..1
+        images = images.to(self.device)
+
+        target_size = self.clip.config.image_size if hasattr(self.clip.config, "image_size") else 224
+        B, C, H, W = images.shape
+        if H != target_size or W != target_size:
+            # Note: torchvision transforms operate on PIL images or batched tensors differently; here we do simple resizing via F.interpolate if needed
+            images = F.interpolate(images, size=(target_size, target_size), mode='bilinear', align_corners=False)
+
+        mean = torch.tensor([0.48145466, 0.4578275, 0.40821073], device=images.device).view(1, C, 1, 1)
+        std = torch.tensor([0.26862954, 0.26130258, 0.27577711], device=images.device).view(1, C, 1, 1)
+        images = (images - mean) / std
+
+        return images
+    
+    @torch.no_grad()
+    def extract_clip_patch_features(self, images):
+        if isinstance(images, Image.Image):
+            images = [images]
+
+        if isinstance(images, (list, tuple)) and isinstance(images[0], Image.Image):
+            proc = []
+            for img in images:
+                t = self.preprocess(img) # ToTensor + Normalize
+                proc.append(t)
+            batch = torch.stack(proc, dim=0).to(self.device)
+        elif isinstance(images, torch.Tensor):
+            batch = self.normalize_batch_tensor(images)
+
+        outputs = self.clip(pixel_values=batch)
+        feats = outputs.last_hidden_size
+        if feats.shape[1] > 1:
+            feats = feats[:, 1:, :] # remove cls token if present
+        
+        return feats
+
     def forward(self, x):
-        feat = x # clip vit 추가
+        feats = self.extract_clip_patch_features(x)
+        B, seq, feat_dim = feats.shape
 
-        if feat.dim() == 4: # [B, C, H, W]
-            B, C, H, W = feat.shape
-            feat = feat.view(B, C, H*W).permute(0, 2, 1) # [B, seq_s, feat_dim=C]
-        B, seq_s, feat_dim = feat.shape
+        feats = self.norm(feats)
 
-        k_proj = self.to_k_injected(feat)
-        v_proj = self.to_v_injected(feat)
-        k_proj = k_proj.view(B, seq_s, self.heads, self.dim_head).permute(0, 2, 1, 3).contiguous() # [B, seq_s, heads, dim_head] -> [B, heads, seq_s, head_dim]
-        v_proj = v_proj.view(B, seq_s, self.heads, self.dim_head).permute(0, 2, 1, 3).contiguous() # [B, seq_s, heads, dim_head] -> [B, heads, seq_s, head_dim]
+        k_proj = self.to_k_injected(feats)
+        v_proj = self.to_v_injected(feats)
+
+        k_proj = k_proj.view(B, seq, self.heads, self.dim_head).permute(0, 2, 1, 3).contiguous() # [B, seq_s, heads, dim_head] -> [B, heads, seq_s, head_dim]
+        v_proj = v_proj.view(B, seq, self.heads, self.dim_head).permute(0, 2, 1, 3).contiguous() # [B, seq_s, heads, dim_head] -> [B, heads, seq_s, head_dim]
 
         return {'k': k_proj, 'v': v_proj, 'sty_alpha': self.sty_alpha}
 
@@ -128,10 +166,10 @@ class StyleEncoder(nn.Module):
 
 
 if __name__ == "__main__":
-    attn = StyleSelfAttention(dim=768, nhead=8, nlayers=2, dim_feedforward=2048, dropout=0.1)
+    model = StyleEncoder(device=torch.device("cpu"))
 
-    total_params = sum(p.numel() for p in attn.parameters())
-    trainable_params = sum(p.numel() for p in attn.parameters() if p.requires_grad)
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 
     print("Total params:", total_params)
     print("Trainable params:", trainable_params)
