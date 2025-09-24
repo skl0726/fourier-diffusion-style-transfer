@@ -145,7 +145,6 @@ def ddim_sample_from_inverted(device,
 
 
 def main(args):
-    # set device
     device = (
         torch.device("cuda") if torch.cuda.is_available() else
         torch.device("mps") if torch.backends.mps.is_available() else
@@ -162,14 +161,15 @@ def main(args):
     # pipe = StableDiffusionPipeline.from_pretrained("runwayml/stable-diffusion-v1-5")
     # pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
     pipe = StableDiffusionPipeline.from_single_file(
-        args.ldm_model_path,
+        MODEL_PATH,
         original_config_file=args.ldm_config_path,
     )
     pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
-    pipe.to(device)
+    pipe = pipe.to(device)
+    pipe.vae.eval()
 
     # load model (for DDIM Sampling - reverse diffusion process)
-    print(f"========== [DDIM Sampling] Loading Latent Diffusion model... ==========")
+    print("========== [DDIM Sampling] Loading Latent Diffusion model... ==========")
     config = OmegaConf.load(CONFIG_PATH)
     ldm_model = instantiate_from_config(config.model)
     if MODEL_PATH.endswith(".safetensors"):
@@ -177,11 +177,24 @@ def main(args):
     else:
         sd = torch.load(MODEL_PATH, map_location="cpu")["state_dict"]   # parameters type: ".ckpt"
     ldm_model.load_state_dict(sd, strict=False)
+
+    if args.ldm_model_style_path:
+        injected_sd = load_file(args.ldm_model_style_path, device='cpu')
+        step = int(injected_sd["meta.step"].item())
+        new_state = {}
+        for key, tensor in injected_sd.items():
+            if key.startswith("meta."):
+                continue
+            new_state[key] = tensor
+        ldm_model.load_state_dict(new_state, strict=False)
+
     ldm_model = ldm_model.to(device).eval()
     sampler = DDIMSampler(ldm_model)
 
-    # load style encoder module
+    # load style encoder (CLIP-based) module
+    print("========== Loading Style Encoder... ==========")
     style_encoder = StyleEncoder(device=device, sty_alpha=args.sty_alpha)
+    style_encoder.to(device)
 
     # load content and style images
     content_img = Image.open(args.cnt_img).convert("RGB")
@@ -261,8 +274,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--ldm_config_path", type=str, default="models/ldm/stable-diffusion-v1-5/v1-inference.yaml")
-    parser.add_argument("--ldm_model_path", type=str, default="models/ldm/stable-diffusion-v1-5/v1-5-pruned.safetensors")
-    parser.add_argument("--selfattn_model_path", type=str, default="models/attention/style-encoder/style_encoder_20000.safetensors")
+    parser.add_argument("--ldm_model_path", type=str, default="models/ldm/stable-diffusion-v1-5/model.safetensors")
+    # parser.add_argument("--ldm_model_style_path", type=str, default="models/ldm/stable-diffusion-v1-5-style/model_style30.safetensors")
+    # parser.add_argument("--selfattn_model_path", type=str, default="models/attention/style-encoder/style_encoder_20000.safetensors")
     
     parser.add_argument("--cnt_img", type=str, required=True)   # _data/cnt/<cnt_image_name>.png 
     parser.add_argument("--sty_img", type=str, default="")      # _data/sty/<sty_image_name>.png 
@@ -279,8 +293,8 @@ if __name__ == "__main__":
 """
 CUDA_VISIBLE_DEVICES=1 python inference/img2img_style.py \
   --cnt_img _data/cnt/cnt1.png \
-  --sty_img _data/sty/sty4.png \
-  --sty_alpha 0.5 \
+  --sty_img _data/sty/sty1.png \
+  --sty_alpha 1.0 \
   --strength 0.4 \
   --ddim_steps 100
 

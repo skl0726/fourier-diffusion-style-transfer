@@ -24,9 +24,6 @@ class StyleEncoder(nn.Module):
             for p in self.clip.parameters():
                 p.requires_grad = False
 
-        clip_feat_dim = self.clip.config.hidden_size
-        self.norm = nn.LayerNorm(clip_feat_dim) # optional
-
         self.preprocess = transforms.Compose([
             transforms.Resize(self.clip.config.image_size if hasattr(self.clip.config, "image_size") else 224),
             transforms.CenterCrop(self.clip.config.image_size if hasattr(self.clip.config, "image_size") else 224),
@@ -77,9 +74,12 @@ class StyleEncoder(nn.Module):
 
     def forward(self, x):
         feats = self.extract_clip_patch_features(x)
-        feats = self.norm(feats)
 
-        return {'k': feats, 'v': feats, 'sty_alpha': self.sty_alpha}
+        return {
+            'k': feats,
+            'v': feats,
+            'sty_alpha': torch.tensor(self.sty_alpha, device=self.device, dtype=feats.dtype)
+        }
 
 
 # import torch, torch.nn as nn

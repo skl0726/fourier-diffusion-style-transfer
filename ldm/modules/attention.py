@@ -163,6 +163,7 @@ class CrossAttention(nn.Module):
         self.to_k = nn.Linear(context_dim, inner_dim, bias=False)
         self.to_v = nn.Linear(context_dim, inner_dim, bias=False)
 
+        # for style image feature
         self.to_k_injected = nn.Linear(clip_feat_dim, inner_dim, bias=False)
         self.to_v_injected = nn.Linear(clip_feat_dim, inner_dim, bias=False)
 

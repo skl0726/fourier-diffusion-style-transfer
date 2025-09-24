@@ -8,6 +8,7 @@ nohup.out
 wikiart/
 
 # LDM parameters
-models/ldm/stable-diffusion-v1-5/v1-5-pruned.safetensors
+models/ldm/stable-diffusion-v1-5/model.safetensors
+models/ldm/stable-diffusion-v1-5-style/
+models/ldm/stable-diffusion-v1-5-style-fft/
 models/attention/style-encoder/
-#models/ldm/stable-diffusion-v1-5-fft/model.safetensors

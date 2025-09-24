@@ -116,36 +116,119 @@ def checkpoint(func, inputs, params, flag):
         return func(*inputs)
 
 
+# class CheckpointFunction(torch.autograd.Function):
+#     @staticmethod
+#     def forward(ctx, run_function, length, *args):
+#         ctx.run_function = run_function
+#         ctx.input_tensors = list(args[:length])
+#         ctx.input_params = list(args[length:])
+
+#         with torch.no_grad():
+#             output_tensors = ctx.run_function(*ctx.input_tensors)
+#         return output_tensors
+
+#     @staticmethod
+#     def backward(ctx, *output_grads):
+#         ctx.input_tensors = [x.detach().requires_grad_(True) for x in ctx.input_tensors]
+#         with torch.enable_grad():
+#             # Fixes a bug where the first op in run_function modifies the
+#             # Tensor storage in place, which is not allowed for detach()'d
+#             # Tensors.
+#             shallow_copies = [x.view_as(x) for x in ctx.input_tensors]
+#             output_tensors = ctx.run_function(*shallow_copies)
+#         input_grads = torch.autograd.grad(
+#             output_tensors,
+#             ctx.input_tensors + ctx.input_params,
+#             output_grads,
+#             allow_unused=True,
+#         )
+#         del ctx.input_tensors
+#         del ctx.input_params
+#         del output_tensors
+#         return (None, None) + input_grads
+
+
 class CheckpointFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, run_function, length, *args):
+        """
+        run_function: callable to run during forward
+        length: number of tensor-type inputs (rest are params)
+        args: inputs followed by params
+        """
         ctx.run_function = run_function
         ctx.input_tensors = list(args[:length])
         ctx.input_params = list(args[length:])
 
+        # Run forward with no grad (checkpointing)
         with torch.no_grad():
             output_tensors = ctx.run_function(*ctx.input_tensors)
         return output_tensors
 
     @staticmethod
     def backward(ctx, *output_grads):
-        ctx.input_tensors = [x.detach().requires_grad_(True) for x in ctx.input_tensors]
+        """
+        Re-run the function under grad for backward.
+        Key points:
+         - Make floating tensors leaf tensors with requires_grad=True
+         - Call autograd.grad ONLY on the subset of inputs that require grad
+         - Map the resulting gradients back to the full inputs order
+        """
+        # 1) prepare inputs: detach and set requires_grad for floating tensors only
+        new_inputs = []
+        for x in ctx.input_tensors:
+            if isinstance(x, torch.Tensor):
+                if x.dtype.is_floating_point:
+                    new_inputs.append(x.detach().requires_grad_(True))
+                else:
+                    new_inputs.append(x.detach())
+            else:
+                new_inputs.append(x)
+        ctx.input_tensors = new_inputs
+
         with torch.enable_grad():
-            # Fixes a bug where the first op in run_function modifies the
-            # Tensor storage in place, which is not allowed for detach()'d
-            # Tensors.
-            shallow_copies = [x.view_as(x) for x in ctx.input_tensors]
+            # Make shallow copies for safety if run_function does in-place ops
+            shallow_copies = [x.view_as(x) if isinstance(x, torch.Tensor) else x for x in ctx.input_tensors]
+
+            # Re-run forward to get outputs for backward
             output_tensors = ctx.run_function(*shallow_copies)
-        input_grads = torch.autograd.grad(
-            output_tensors,
-            ctx.input_tensors + ctx.input_params,
-            output_grads,
-            allow_unused=True,
-        )
+
+        # 2) build a flat list of all inputs (tensors + params)
+        all_inputs = ctx.input_tensors + ctx.input_params
+
+        # 3) select only tensors that actually require grad
+        tensors_for_grad_idx = []
+        tensors_for_grad = []
+        for idx, t in enumerate(all_inputs):
+            if isinstance(t, torch.Tensor) and t.requires_grad:
+                tensors_for_grad_idx.append(idx)
+                tensors_for_grad.append(t)
+
+        # 4) if none require grad, return Nones for all grads
+        if len(tensors_for_grad) == 0:
+            input_grads = [None] * len(all_inputs)
+        else:
+            # Compute gradients only w.r.t. the selected tensors
+            grads = torch.autograd.grad(
+                output_tensors,
+                tensors_for_grad,
+                output_grads,
+                allow_unused=True,
+            )
+
+            # Map grads (which correspond to tensors_for_grad) back to full order
+            input_grads = [None] * len(all_inputs)
+            for i, g in enumerate(grads):
+                orig_idx = tensors_for_grad_idx[i]
+                input_grads[orig_idx] = g
+
+        # cleanup
         del ctx.input_tensors
         del ctx.input_params
         del output_tensors
-        return (None, None) + input_grads
+
+        # Return two Nones for run_function and length, then grads for each original arg
+        return (None, None) + tuple(input_grads)
 
 
 def timestep_embedding(timesteps, dim, max_period=10000, repeat_only=False):
