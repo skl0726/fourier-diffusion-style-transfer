@@ -168,7 +168,6 @@ def main(args):
     pipe = StableDiffusionPipeline.from_single_file(
         args.ldm_model_path,
         original_config_file=args.ldm_config_path,
-        torch_dtype=torch.float16 if torch.cuda.is_available() else None,
     )
     pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
     pipe.to(device)
